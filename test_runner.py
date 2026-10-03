@@ -87,7 +87,7 @@ class CoordinatorClient:
                                 cb(decoded)
                             except Exception:
                                 pass
-            except (serial.SerialException, TypeError):
+            except (serial.SerialException, TypeError, OSError, Exception):
                 break
 
 
@@ -153,9 +153,9 @@ def run_setup_bridge_test(client: CoordinatorClient, target: str = "Kitchen", ti
 
     print("-" * 65)
     if success:
-        print(f"[✓] TEST PASSED: Serial bridge initialized successfully ({elapsed:.1f}ms)!")
+        print(f"[+] TEST PASSED: Serial bridge initialized successfully ({elapsed:.1f}ms)!")
     else:
-        print(f"[✗] TEST FAILED: Timed out waiting for 'SETUP SERIAL OK' from {target}.")
+        print(f"[-] TEST FAILED: Timed out waiting for 'SETUP SERIAL OK' from {target}.")
     return success
 
 
@@ -199,10 +199,10 @@ def run_blink_test(client: CoordinatorClient, target: str = "Kitchen", count: in
     print("-" * 65)
 
     if observed == count:
-        print(f"[✓] TEST PASSED: Confirmed {count} flashes on ESP32-C6 onboard LED!")
+        print(f"[+] TEST PASSED: Confirmed {count} flashes on ESP32-C6 onboard LED!")
         return True
     else:
-        print(f"[✗] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
+        print(f"[-] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
         return False
 
 
@@ -246,10 +246,10 @@ def run_blinkx_test(client: CoordinatorClient, target: str = "Kitchen", count: i
     print("-" * 65)
 
     if observed == count:
-        print(f"[✓] TEST PASSED: Confirmed {count} blue flashes on Arduino DotStar LED!")
+        print(f"[+] TEST PASSED: Confirmed {count} blue flashes on Arduino DotStar LED!")
         return True
     else:
-        print(f"[✗] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
+        print(f"[-] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
         return False
 
 
@@ -285,11 +285,11 @@ def run_ping_test(client: CoordinatorClient, target: str = "Kitchen", timeout: f
 
     print("-" * 65)
     if success:
-        print(f"[✓] TEST PASSED: Received 'GotPing' reply in {elapsed_ms:.1f}ms!")
+        print(f"[+] TEST PASSED: Received 'GotPing' reply in {elapsed_ms:.1f}ms!")
         print("    End-to-End Link Verified:")
         print("    Host -> Coordinator -> Zigbee -> ESP32-C6 -> Arduino -> ESP32-C6 -> Zigbee -> Coordinator -> Host")
     else:
-        print(f"[✗] TEST FAILED: Timed out after {timeout:.1f}s waiting for 'GotPing' from {target}.")
+        print(f"[-] TEST FAILED: Timed out after {timeout:.1f}s waiting for 'GotPing' from {target}.")
     return success
 
 
@@ -327,10 +327,10 @@ def run_dac_test(client: CoordinatorClient, target: str = "Kitchen", dac_val: in
 
     print("-" * 65)
     if success:
-        print(f"[✓] TEST PASSED: Received '{expected_token}' reply in {elapsed_ms:.1f}ms!")
+        print(f"[+] TEST PASSED: Received '{expected_token}' reply in {elapsed_ms:.1f}ms!")
         print(f"    Trinket M0 Pin A0 is now driven at ~{voltage:.2f}V.")
     else:
-        print(f"[✗] TEST FAILED: Did not receive '{expected_token}' from {target} within {timeout:.1f}s.")
+        print(f"[-] TEST FAILED: Did not receive '{expected_token}' from {target} within {timeout:.1f}s.")
     return success
 
 
@@ -415,9 +415,9 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
 
     passed = resp in ("y", "yes")
     if passed:
-        print("[✓] TEST PASSED: Servo PWM snap and slew motion verified successfully!")
+        print("[+] TEST PASSED: Servo PWM snap and slew motion verified successfully!")
     else:
-        print("[✗] TEST FAILED: Servo motion was not confirmed by operator.")
+        print("[-] TEST FAILED: Servo motion was not confirmed by operator.")
     return passed
 
 
@@ -470,7 +470,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
     all_passed = True
     for key, label in labels.items():
         passed = results.get(key, False)
-        status = "[PASS] ✓" if passed else "[FAIL] ✗"
+        status = "[PASS]" if passed else "[FAIL]"
         if not passed:
             all_passed = False
         print(f"  {status:<10} {label}")

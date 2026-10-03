@@ -334,6 +334,93 @@ def run_dac_test(client: CoordinatorClient, target: str = "Kitchen", dac_val: in
     return success
 
 
+def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
+    """
+    Executes the Hobby Servo PWM test on Pin 2 (Channel 1):
+    1. SetupPWM1 (Pin 2 @ 50Hz, center 77)
+    2. Zero slew snap: pwmSlew1 0 -> pwm1 51 -> pwm1 102 -> pwm1 51
+    3. Smooth slew 30: pwmSlew1 30 -> pwm1 102 -> pwm1 51 -> (center 77)
+    4. Operator confirms visual snap vs slew behavior.
+    """
+    print("\n" + "=" * 65)
+    print("--- SERVO / PWM HARDWARE TEST (PIN 2) ---")
+    print(f"Target Node: {target} (ESP32-C6 Pin 2 -> 74HCT125 -> Servo)")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        print(f"  <-- [RX] {msg}")
+
+    client.add_rx_callback(on_rx)
+
+    # 1. Initialize PWM1
+    cmd = f"{target} SetupPWM1"
+    print(f"\n[>] Initializing PWM Channel 1: \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(0.5)
+
+    # 2. Phase 1: Zero Slew (Instant Snap)
+    print("\n>>> Phase 1: Instant Snap (pwmSlew1 0) <<<")
+    cmd = f"{target} pwmSlew1 0"
+    print(f"[>] Setting slew to 0 (instant): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(0.3)
+
+    cmd = f"{target} pwm1 51"
+    print(f"[>] Snap to Min duty 51 (~1.0ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(1.0)
+
+    cmd = f"{target} pwm1 102"
+    print(f"[>] Snap to Max duty 102 (~2.0ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(1.0)
+
+    cmd = f"{target} pwm1 51"
+    print(f"[>] Snap back to Min duty 51 (~1.0ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(1.0)
+
+    # 3. Phase 2: Slew Rate 30 (Smooth Gliding Motion)
+    print("\n>>> Phase 2: Smooth Slewing (pwmSlew1 30) <<<")
+    cmd = f"{target} pwmSlew1 30"
+    print(f"[>] Setting slew rate to 30 units/sec: \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(0.3)
+
+    cmd = f"{target} pwm1 102"
+    print(f"[>] Smooth slew to Max duty 102 (~2.0ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(2.2)
+
+    cmd = f"{target} pwm1 51"
+    print(f"[>] Smooth slew back to Min duty 51 (~1.0ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(2.2)
+
+    # Return to neutral center
+    cmd = f"{target} pwm1 77"
+    print(f"[>] Returning to Center duty 77 (~1.5ms): \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(1.0)
+
+    client.remove_rx_callback(on_rx)
+
+    print("\n" + "-" * 65)
+    print("[?] Visual Verification:")
+    print("    1. Did the servo snap quickly between positions with slew=0 (51 -> 102 -> 51)?")
+    print("    2. Did the servo sweep smoothly and slowly with slew=30 (51 -> 102 -> 51)?")
+    resp = input("    Confirm servo motion observed? [y/N]: ").strip().lower()
+    print("-" * 65)
+
+    passed = resp in ("y", "yes")
+    if passed:
+        print("[✓] TEST PASSED: Servo PWM snap and slew motion verified successfully!")
+    else:
+        print("[✗] TEST FAILED: Servo motion was not confirmed by operator.")
+    return passed
+
+
 def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
     """Executes all regression tests in sequence and displays a structured report."""
     print("\n" + "=" * 65)
@@ -362,6 +449,10 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     # Test 5: Arduino Hardware DAC
     results["Arduino_DAC"] = run_dac_test(client, target=target, dac_val=dac_val)
+    time.sleep(0.5)
+
+    # Test 6: Servo / PWM Snap and Slew Test
+    results["Servo_PWM"] = run_servo_pwm_test(client, target=target)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
@@ -372,7 +463,8 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "ESP32_Blink":       f"2. ESP32-C6 Onboard LED Blink ({blink_count} flashes)",
         "Arduino_Blinkx":    f"3. Arduino DotStar Blinkx     ({blinkx_count} flashes)",
         "Serial_Ping":       "4. Two-Way Serial Ping        (GotPing)",
-        "Arduino_DAC":       f"5. Arduino Hardware DAC        (GotDAC {dac_val})"
+        "Arduino_DAC":       f"5. Arduino Hardware DAC        (GotDAC {dac_val})",
+        "Servo_PWM":         "6. Servo / PWM Motion         (Snap & Slew 30)"
     }
 
     all_passed = True
@@ -385,7 +477,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     print("=" * 65)
     if all_passed:
-        print("  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! (5/5) <<<")
+        print("  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! (6/6) <<<")
     else:
         print("  >>> ONE OR MORE TESTS FAILED - REVIEW LOGS ABOVE <<<")
     print("=" * 65 + "\n")
@@ -438,7 +530,8 @@ def main():
     parser.add_argument("--blinkx", action="store_true", help="Run Arduino DotStar blinkx test and exit")
     parser.add_argument("--ping", action="store_true", help="Run the two-way GotPing round-trip test and exit")
     parser.add_argument("--bridge", action="store_true", help="Run SetupSerialBridge test and exit")
-    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-5) and exit")
+    parser.add_argument("--servo", "--pwm", action="store_true", help="Run Servo / PWM test on Pin 2 (snap vs slew 30) and exit")
+    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-6) and exit")
 
     args = parser.parse_args()
 
@@ -474,25 +567,30 @@ def main():
             passed = run_dac_test(client, target=args.target, dac_val=args.dac)
             sys.exit(0 if passed else 1)
 
+        if args.servo or args.pwm:
+            passed = run_servo_pwm_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
         # Interactive Menu
         while True:
             print("\n=======================================================")
             print("         ZIGBEE HIL REGRESSION TEST RUNNER")
             print("=======================================================")
-            print("  [1] Run Full Regression Test Suite (Tests 1-5)")
+            print("  [1] Run Full Regression Test Suite (Tests 1-6)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count})")
             print("  [5] Two-Way Serial Ping Test    (GotPing)")
             print("  [6] Arduino Hardware DAC Test   (setDAC X)")
-            print("  [7] Request Network Report      (GiveNetworkReport)")
-            print("  [8] Ping Network Nodes          (PingNetwork)")
-            print("  [9] Interactive PuTTY Console Mode")
+            print("  [7] Servo / PWM Test (Pin 2: Snap vs Slew 30)")
+            print("  [8] Request Network Report      (GiveNetworkReport)")
+            print("  [9] Ping Network Nodes          (PingNetwork)")
+            print("  [0] Interactive PuTTY Console Mode")
             print(f"  [T] Change Target Node Name     (Current: {args.target})")
-            print("  [0] Exit")
+            print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, T]: ").strip().upper()
+            choice = input("Enter selection [0-9, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, blink_count=args.count, blinkx_count=args.count)
@@ -509,20 +607,22 @@ def main():
                 dac_val = int(val_str) if val_str.isdigit() else 512
                 run_dac_test(client, target=args.target, dac_val=dac_val)
             elif choice == "7":
+                run_servo_pwm_test(client, target=args.target)
+            elif choice == "8":
                 print("\n[>] Requesting Network Report...")
                 client.send_line("GiveNetworkReport")
                 time.sleep(2.0)
-            elif choice == "8":
+            elif choice == "9":
                 print("\n[>] Pinging network nodes...")
                 client.send_line("PingNetwork")
                 time.sleep(1.5)
-            elif choice == "9":
+            elif choice == "0":
                 interactive_terminal(client)
             elif choice == "T":
                 new_target = input(f"Enter new target node name [{args.target}]: ").strip()
                 if new_target:
                     args.target = new_target
-            elif choice in ("0", "EXIT", "QUIT", "Q"):
+            elif choice in ("X", "EXIT", "QUIT", "Q"):
                 break
             else:
                 print("[!] Invalid option, please retry.")

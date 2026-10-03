@@ -567,7 +567,7 @@ def main():
             passed = run_dac_test(client, target=args.target, dac_val=args.dac)
             sys.exit(0 if passed else 1)
 
-        if args.servo or args.pwm:
+        if args.servo:
             passed = run_servo_pwm_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 

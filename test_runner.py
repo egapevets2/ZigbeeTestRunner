@@ -556,14 +556,20 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.blinkx:
+            run_setup_bridge_test(client, target=args.target)
+            time.sleep(0.3)
             passed = run_blinkx_test(client, target=args.target, count=args.count)
             sys.exit(0 if passed else 1)
 
         if args.ping:
+            run_setup_bridge_test(client, target=args.target)
+            time.sleep(0.3)
             passed = run_ping_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 
         if args.dac is not None:
+            run_setup_bridge_test(client, target=args.target)
+            time.sleep(0.3)
             passed = run_dac_test(client, target=args.target, dac_val=args.dac)
             sys.exit(0 if passed else 1)
 
@@ -579,9 +585,9 @@ def main():
             print("  [1] Run Full Regression Test Suite (Tests 1-6)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
-            print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count})")
-            print("  [5] Two-Way Serial Ping Test    (GotPing)")
-            print("  [6] Arduino Hardware DAC Test   (setDAC X)")
+            print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
+            print("  [5] Two-Way Serial Ping Test    (GotPing)             [Auto-Bridge]")
+            print("  [6] Arduino Hardware DAC Test   (setDAC X)            [Auto-Bridge]")
             print("  [7] Servo / PWM Test (Pin 2: Snap vs Slew 30)")
             print("  [8] Request Network Report      (GiveNetworkReport)")
             print("  [9] Ping Network Nodes          (PingNetwork)")
@@ -599,10 +605,16 @@ def main():
             elif choice == "3":
                 run_blink_test(client, target=args.target, count=args.count)
             elif choice == "4":
+                run_setup_bridge_test(client, target=args.target)
+                time.sleep(0.3)
                 run_blinkx_test(client, target=args.target, count=args.count)
             elif choice == "5":
+                run_setup_bridge_test(client, target=args.target)
+                time.sleep(0.3)
                 run_ping_test(client, target=args.target)
             elif choice == "6":
+                run_setup_bridge_test(client, target=args.target)
+                time.sleep(0.3)
                 val_str = input("Enter DAC value (0-1023, where 512 ~ 1.65V, 1023 ~ 3.3V) [512]: ").strip()
                 dac_val = int(val_str) if val_str.isdigit() else 512
                 run_dac_test(client, target=args.target, dac_val=dac_val)

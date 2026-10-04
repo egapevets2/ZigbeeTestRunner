@@ -809,6 +809,133 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     return passed
 
 
+def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> int | None:
+    """Sends `<target> ReadProximity` and returns the proximity count (or None on failure)."""
+    val_event = threading.Event()
+    prox_reading = [None]
+
+    def on_rx(msg: str):
+        if "PROXval" in msg:
+            parts = msg.strip().split()
+            for i, p in enumerate(parts):
+                if p == "PROXval" and i + 1 < len(parts):
+                    try:
+                        prox_reading[0] = int(parts[i + 1])
+                        val_event.set()
+                    except ValueError:
+                        pass
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} ReadProximity"
+    client.send_line(cmd)
+    val_event.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+    return prox_reading[0]
+
+
+def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
+    """
+    Executes the APDS9930 Proximity Sensor Test:
+    1. Initializes APDS9930 sensor (<target> SetupProximity).
+    2. Queries baseline ambient proximity value (<target> ReadProximity).
+    3. Prompts user to approach sensor with hand/obstacle and listens for 'Car Detected <val>'.
+    4. Prompts user to withdraw hand and listens for 'Car removed <val>'.
+    5. Verifies end-to-end event flow over Zigbee.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST 9/9] APDS9930 PROXIMITY SENSOR TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        print(f"  <-- [RX] {msg}")
+
+    client.add_rx_callback(on_rx)
+
+    # Step 1: Setup Proximity
+    setup_event = threading.Event()
+    def on_setup(msg: str):
+        if "SETUP PROX OK" in msg:
+            setup_event.set()
+
+    client.add_rx_callback(on_setup)
+    cmd = f"{target} SetupProximity"
+    print(f"\n[>] Initializing APDS9930 sensor: \"{cmd}\"")
+    client.send_line(cmd)
+    got_setup = setup_event.wait(timeout=3.0)
+    client.remove_rx_callback(on_setup)
+
+    if not got_setup:
+        print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' from {target}.")
+        client.remove_rx_callback(on_rx)
+        return False
+    print(f"[+] APDS9930 sensor initialized successfully.")
+    time.sleep(0.3)
+
+    # Step 2: Read baseline proximity reading
+    print(f"\n[>] Reading baseline proximity...")
+    baseline = read_proximity_val(client, target=target, timeout=3.0)
+    if baseline is not None:
+        print(f"[+] Baseline proximity reading: {baseline}")
+    else:
+        print(f"[!] Warning: Could not read instantaneous baseline proximity reading, continuing.")
+
+    # Step 3: Wait for Car Detected & Car Removed
+    detected_event = threading.Event()
+    detected_val = [None]
+    removed_event = threading.Event()
+    removed_val = [None]
+
+    def on_prox_event(msg: str):
+        if "Car Detected" in msg:
+            parts = msg.strip().split()
+            for i, p in enumerate(parts):
+                if p == "Detected" and i + 1 < len(parts):
+                    detected_val[0] = parts[i + 1]
+            detected_event.set()
+        elif "Car removed" in msg:
+            parts = msg.strip().split()
+            for i, p in enumerate(parts):
+                if p == "removed" and i + 1 < len(parts):
+                    removed_val[0] = parts[i + 1]
+            removed_event.set()
+
+    client.add_rx_callback(on_prox_event)
+
+    print("\n" + "-" * 65)
+    print(">>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
+    print("Waiting up to 20 seconds for 'Car Detected' event...")
+    got_detected = detected_event.wait(timeout=20.0)
+
+    if not got_detected:
+        print(f"\n[-] TEST FAILED: Timed out waiting for 'Car Detected' event.")
+        client.remove_rx_callback(on_prox_event)
+        client.remove_rx_callback(on_rx)
+        return False
+
+    val_str = f" (reading: {detected_val[0]})" if detected_val[0] else ""
+    print(f"\n[+] OBSTACLE DETECTED{val_str} verified over Zigbee!")
+
+    print("\n>>> ACTION REQUIRED: Move your hand away from the sensor. <<<")
+    print("Waiting up to 20 seconds for 'Car removed' event...")
+    got_removed = removed_event.wait(timeout=20.0)
+
+    client.remove_rx_callback(on_prox_event)
+    client.remove_rx_callback(on_rx)
+
+    if not got_removed:
+        print(f"\n[-] TEST FAILED: Timed out waiting for 'Car removed' event.")
+        return False
+
+    val_rem_str = f" (reading: {removed_val[0]})" if removed_val[0] else ""
+    print(f"\n[+] OBSTACLE REMOVAL{val_rem_str} verified over Zigbee!")
+
+    print("-" * 65)
+    print("[+] TEST PASSED: APDS9930 Proximity sensor detection & removal cycle fully verified!")
+    return True
+
+
 def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
     """Executes all regression tests in sequence and displays a structured report."""
     print("\n" + "=" * 65)
@@ -849,6 +976,10 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     # Test 8: Servo / PWM Snap and Slew Test
     results["Servo_PWM"] = run_servo_pwm_test(client, target=target)
+    time.sleep(0.5)
+
+    # Test 9: APDS9930 Proximity Sensor Test
+    results["APDS9930_Prox"] = run_proximity_test(client, target=target)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
@@ -862,7 +993,8 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "Arduino_DAC":       f"5. Arduino Hardware DAC        (GotDAC {dac_val})",
         "DAC_ADC_Loopback":  "6. DAC -> ADC Loopback        (Pin 1~ -> Pin A1)",
         "Schmitt_Ramp":      "7. Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
-        "Servo_PWM":         "8. Servo / PWM Motion         (Snap & Slew 30)"
+        "Servo_PWM":         "8. Servo / PWM Motion         (Snap & Slew 30)",
+        "APDS9930_Prox":     "9. APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)"
     }
 
     all_passed = True
@@ -875,7 +1007,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     print("=" * 65)
     if all_passed:
-        print("  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! (8/8) <<<")
+        print("  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! (9/9) <<<")
     else:
         print("  >>> ONE OR MORE TESTS FAILED - REVIEW LOGS ABOVE <<<")
     print("=" * 65 + "\n")
@@ -888,6 +1020,8 @@ def interactive_terminal(client: CoordinatorClient):
     print("\n[+] Entering Interactive PuTTY-Bridge Console mode.")
     print("    Type coordinator commands like:")
     print("      Kitchen SetupSerialBridge")
+    print("      Kitchen SetupProximity")
+    print("      Kitchen ReadProximity")
     print("      Kitchen blink 3")
     print("      Kitchen blinkx 5")
     print("      Kitchen ping")
@@ -932,7 +1066,9 @@ def main():
     parser.add_argument("--bridge", action="store_true", help="Run SetupSerialBridge test and exit")
     parser.add_argument("--servo", "--pwm", action="store_true", help="Run Servo / PWM test on Pin 2 (snap vs slew 30) and exit")
     parser.add_argument("--schmitt", "--ramp", action="store_true", help="Run Schmitt trigger hysteresis ramp test (2s up + 2s down) and exit")
-    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-8) and exit")
+    parser.add_argument("--prox", "--proximity", action="store_true", help="Run APDS9930 Proximity Sensor test and exit")
+    parser.add_argument("--read-prox", action="store_true", help="Read APDS9930 instantaneous proximity value and exit")
+    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-9) and exit")
 
     args = parser.parse_args()
 
@@ -993,12 +1129,25 @@ def main():
             passed = run_servo_pwm_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 
+        if args.prox:
+            passed = run_proximity_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
+        if args.read_prox:
+            val = read_proximity_val(client, target=args.target)
+            if val is not None:
+                print(f"[+] Instantaneous Proximity Value: {val}")
+                sys.exit(0)
+            else:
+                print("[-] Failed to read proximity value.")
+                sys.exit(1)
+
         # Interactive Menu
         while True:
             print("\n=======================================================")
             print("         ZIGBEE HIL REGRESSION TEST RUNNER")
             print("=======================================================")
-            print("  [1] Run Full Regression Test Suite (Tests 1-8)")
+            print("  [1] Run Full Regression Test Suite (Tests 1-9)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
@@ -1008,6 +1157,8 @@ def main():
             print("  [8] Closed-Loop DAC -> ADC Test (Pin 1~ -> Pin A1)    [Auto-Bridge]")
             print("  [9] Schmitt Trigger Ramp Test   (0 -> 1000 -> 0, 2s+2s)")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
+            print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
+            print("  [R] Read Proximity Value        (ReadProximity)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
             print("  [0] Interactive PuTTY Console Mode")
@@ -1015,7 +1166,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, D, R, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, blink_count=args.count, blinkx_count=args.count)
@@ -1047,6 +1198,14 @@ def main():
                 run_schmitt_hysteresis_ramp_test(client, target=args.target)
             elif choice in ("S", "SERVO", "PWM"):
                 run_servo_pwm_test(client, target=args.target)
+            elif choice in ("D", "PROX", "PROXIMITY"):
+                run_proximity_test(client, target=args.target)
+            elif choice in ("R", "READPROX"):
+                val = read_proximity_val(client, target=args.target)
+                if val is not None:
+                    print(f"\n[+] Instantaneous Proximity Value: {val}")
+                else:
+                    print("\n[-] Failed to read proximity value.")
             elif choice in ("N", "REPORT"):
                 print("\n[>] Requesting Network Report...")
                 client.send_line("GiveNetworkReport")

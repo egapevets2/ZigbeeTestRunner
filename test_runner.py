@@ -201,6 +201,13 @@ def run_blink_test(client: CoordinatorClient, target: str = "Kitchen", count: in
     print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
+    print("\n[!] ACTION REQUIRED: Look at the ESP32-C6 onboard LED.")
+    print(f"    Watch for {count} LED flash(es) and count them.")
+    try:
+        input("    Press [Enter] when ready to begin test...")
+    except (EOFError, OSError):
+        pass
+
     def on_rx(msg: str):
         print(f"  <-- [RX] {msg}")
 
@@ -247,6 +254,13 @@ def run_blinkx_test(client: CoordinatorClient, target: str = "Kitchen", count: i
     print(f"Requested Blinks: {count}")
     print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
+
+    print("\n[!] ACTION REQUIRED: Look at the Arduino Trinket M0 Blue DotStar LED.")
+    print(f"    Watch for {count} BLUE flash(es) on the DotStar LED and count them.")
+    try:
+        input("    Press [Enter] when ready to begin test...")
+    except (EOFError, OSError):
+        pass
 
     def on_rx(msg: str):
         print(f"  <-- [RX] {msg}")
@@ -737,6 +751,15 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
+    print("\n[!] ACTION REQUIRED: Look at the Servo motor horn (Pin 2).")
+    print("    Watch for two distinct motion phases:")
+    print("      1. Instant snap between positions (slew rate = 0).")
+    print("      2. Smooth, slow sweeping motion between positions (slew rate = 30).")
+    try:
+        input("    Press [Enter] when ready to begin test...")
+    except (EOFError, OSError):
+        pass
+
     def on_rx(msg: str):
         print(f"  <-- [RX] {msg}")
 
@@ -826,6 +849,17 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
     print(f"Target Node: {target} (Pin 18: PWM Speed | Pin 20: Direction)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
+
+    print("\n[!] ACTION REQUIRED: Look at the Cytron 10C DC motor.")
+    print("    Watch for the motor speed and direction profile:")
+    print("      1. Smooth 2-second ramp up from still to 100% forward.")
+    print("      2. Smooth 4-second ramp from 100% forward to 100% reverse.")
+    print("      3. 1-second pause at 100% reverse.")
+    print("      4. Instant stop (zero output with no ramp).")
+    try:
+        input("    Press [Enter] when ready to begin test...")
+    except (EOFError, OSError):
+        pass
 
     def on_rx(msg: str):
         clean = msg.strip()
@@ -1004,7 +1038,12 @@ def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     client.add_rx_callback(on_prox_event)
 
     print("\n" + "-" * 65)
-    print(">>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
+    print("[!] ACTION REQUIRED: Prepare to bring your hand or an obstacle within 5-10cm of the APDS9930 sensor.")
+    try:
+        input("    Press [Enter] when ready to begin proximity detection test...")
+    except (EOFError, OSError):
+        pass
+    print("\n>>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
     print("Waiting up to 20 seconds for 'Car Detected' event...")
     got_detected = detected_event.wait(timeout=20.0)
 

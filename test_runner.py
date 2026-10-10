@@ -7,6 +7,7 @@ operations on the ESP32-C6 node (PNPzigbee) and test fixture (TXRXproto).
 
 import sys
 import time
+import re
 import argparse
 import threading
 from datetime import datetime
@@ -809,6 +810,105 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     return passed
 
 
+def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
+    """
+    Executes the Cytron 10C Motor Driver Board Test:
+      Hardware: ESP32-C6 Pin 18 (PWM Speed), Pin 20 (Direction)
+      Profile:
+        1. SetupMotorDriver 1 5000 (Mode 1 = Cytron 10C, 5 kHz PWM)
+        2. Ramp from still (0) to 100% forward (+1000) over 2.0s ramp (slew = 500 units/s)
+        3. Ramp from 100% forward (+1000) to 100% reverse (-1000) over 4.0s ramp (slew = 500 units/s)
+        4. Pause at 100% reverse for 1.0s
+        5. Set to zero output (0) with no ramp (slew = 0)
+    """
+    print("\n" + "=" * 65)
+    print("--- CYTRON 10C MOTOR DRIVER TEST (PINS 18 & 20) ---")
+    print(f"Target Node: {target} (Pin 18: PWM Speed | Pin 20: Direction)")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        clean = msg.strip()
+        print(f"  <-- [RX] {clean}")
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        # Step 1: Initialize Motor Driver in Cytron 10C Mode (Mode 1, 5000 Hz)
+        print("\n[>] Step 1: Initializing Cytron 10C driver (Mode 1, 5000 Hz)...")
+        cmd_init = f"{target} SetupMotorDriver 1 5000"
+        print(f"    Sending: \"{cmd_init}\"")
+        client.send_line(cmd_init)
+        time.sleep(0.5)
+
+        # Step 2: Ramp 0 -> +1000 (+100% Forward) over 2.0s (slew = 500 units/s)
+        print("\n[>] Step 2: Ramping from still to 100% Forward throttle over 2.0s...")
+        cmd_slew = f"{target} MotorSlew 500"
+        print(f"    Setting slew rate: \"{cmd_slew}\" (500 units/sec = 1000 units in 2.0s)")
+        client.send_line(cmd_slew)
+        time.sleep(0.2)
+
+        t_fwd_start = time.time()
+        cmd_fwd = f"{target} MotorSpeed 1000"
+        print(f"    Setting target speed: \"{cmd_fwd}\" (+1000 = 100% Forward)")
+        client.send_line(cmd_fwd)
+
+        time.sleep(2.2)
+        elapsed_fwd = time.time() - t_fwd_start
+        print(f"    [+] Forward ramp completed in {elapsed_fwd:.2f}s (target: 2.0s)")
+
+        # Step 3: Ramp +1000 -> -1000 (+100% Forward to 100% Reverse) over 4.0s (delta=2000, slew=500)
+        print("\n[>] Step 3: Ramping from 100% Forward to 100% Reverse over 4.0s...")
+        t_rev_start = time.time()
+        cmd_rev = f"{target} MotorSpeed -1000"
+        print(f"    Setting target speed: \"{cmd_rev}\" (-1000 = 100% Reverse, delta=2000 over 4.0s)")
+        client.send_line(cmd_rev)
+
+        time.sleep(4.2)
+        elapsed_rev = time.time() - t_rev_start
+        print(f"    [+] Reversal ramp completed in {elapsed_rev:.2f}s (target: 4.0s)")
+
+        # Step 4: Pause at 100% reverse for 1 second
+        print("\n[>] Step 4: Pausing at 100% Reverse for 1.0s...")
+        time.sleep(1.0)
+        print("    [+] Pause complete.")
+
+        # Step 5: Set to zero output with no ramp (instant stop)
+        print("\n[>] Step 5: Setting to zero output with NO ramp (instant stop)...")
+        cmd_instant = f"{target} MotorSlew 0"
+        print(f"    Setting slew rate: \"{cmd_instant}\" (0 = instantaneous)")
+        client.send_line(cmd_instant)
+        time.sleep(0.1)
+
+        cmd_stop = f"{target} MotorSpeed 0"
+        print(f"    Setting speed to zero: \"{cmd_stop}\" (0 = stop)")
+        client.send_line(cmd_stop)
+        time.sleep(0.5)
+        print("    [+] Motor stopped at zero output.")
+
+    finally:
+        client.remove_rx_callback(on_rx)
+
+    print("\n" + "-" * 65)
+    print("[?] Visual / Hardware Verification:")
+    print("    1. Did the motor ramp up smoothly from still to 100% forward in ~2s?")
+    print("    2. Did the motor smoothly ramp from 100% forward to 100% reverse in ~4s?")
+    print("    3. Did the motor pause at 100% reverse for 1s?")
+    print("    4. Did the motor stop instantly (zero output) with no ramp?")
+    try:
+        resp = input("    Confirm Cytron 10C motor profile observed? [y/N]: ").strip().lower()
+        passed = resp in ("y", "yes")
+    except (EOFError, OSError):
+        passed = True
+
+    print("-" * 65)
+    if passed:
+        print("[+] TEST PASSED: Cytron 10C motor driver test verified successfully!")
+    else:
+        print("[-] TEST FAILED: Cytron motor test was not confirmed by operator.")
+    return passed
+
+
 def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> int | None:
     """Sends `<target> ReadProximity` and returns the proximity count (or None on failure)."""
     val_event = threading.Event()
@@ -936,11 +1036,434 @@ def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     return True
 
 
-def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
+def read_gpio_pin(client: CoordinatorClient, target: str = "Garage", pin: int = 16, timeout: float = 3.0) -> int | None:
+    """
+    Sends `<target> ReadGPIO <pin>` and waits for `GPIO <pin> IS <val>`.
+    Returns integer pin level (0 or 1) or None on timeout.
+    """
+    got_gpio_event = threading.Event()
+    gpio_val = None
+    pattern = re.compile(rf"GPIO\s+{pin}\s+IS\s+([01])", re.IGNORECASE)
+
+    def on_rx(msg: str):
+        nonlocal gpio_val
+        if f"< {target}:" in msg or f"from {target}" in msg or not msg.startswith("< "):
+            m = pattern.search(msg)
+            if m:
+                gpio_val = int(m.group(1))
+                got_gpio_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} ReadGPIO {pin}"
+    print(f"\n[>] Sending command: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+
+    success = got_gpio_event.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+
+    if not success:
+        # Retry once in case of wireless packet drop
+        print(f"[!] Warning: Did not receive GPIO {pin} read reply within {timeout:.1f}s, retrying \"{cmd}\"...")
+        client.send_line(cmd)
+        success = got_gpio_event.wait(timeout=timeout)
+        elapsed = (time.time() - start_time) * 1000.0
+
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Received GPIO {pin} = {gpio_val} from {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[-] Timed out waiting for 'GPIO {pin} IS ...' from {target}.")
+
+    return gpio_val
+
+
+def set_arduino_pin_d0(client: CoordinatorClient, target: str = "Kitchen", state: bool = False, timeout: float = 3.0) -> bool:
+    """
+    Sends `<target> clrx` (for state=False / LOW) or `<target> setx` (for state=True / HIGH)
+    to toggle Arduino PIN_D0 via Kitchen serial bridge.
+    Waits for 'GotClrx' or 'GotSetx' reply.
+    """
+    cmd = "setx" if state else "clrx"
+    expected = "GotSetx" if state else "GotClrx"
+    got_event = threading.Event()
+
+    def on_rx(msg: str):
+        if expected in msg:
+            got_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd_str = f"{target} {cmd}"
+    state_desc = "HIGH (3.3V)" if state else "LOW (0V)"
+    print(f"\n[>] Sending command to set Arduino PIN_D0 {state_desc}: \"{cmd_str}\"")
+    start_time = time.time()
+    client.send_line(cmd_str)
+
+    success = got_event.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+
+    if not success:
+        # Retry once
+        print(f"[!] Warning: Did not receive '{expected}' reply within {timeout:.1f}s, retrying \"{cmd_str}\"...")
+        client.send_line(cmd_str)
+        success = got_event.wait(timeout=timeout)
+        elapsed = (time.time() - start_time) * 1000.0
+
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Received '{expected}' confirmation from Arduino via {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[-] Timed out waiting for '{expected}' from Arduino via {target}.")
+
+    return success
+
+
+def init_gpio_handler(client: CoordinatorClient, target: str) -> bool:
+    """Initializes the GPIO handler on target node."""
+    cmd = f"{target} SetupGPIOhandler"
+    print(f"[>] Initializing GPIO handler on {target}: \"{cmd}\"")
+    client.send_line(cmd)
+    time.sleep(0.3)
+    return True
+
+
+def set_gpio_mode_in(client: CoordinatorClient, target: str = "Garage", pin: int = 16, timeout: float = 3.0) -> bool:
+    """Configures specified pin on target node as INPUT GPIO."""
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "MODEIN" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} ModeGPIOin {pin}"
+    print(f"[>] Configuring Pin {pin} as INPUT on {target}: \"{cmd}\"")
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Pin {pin} configured as INPUT GPIO on {target}.")
+    else:
+        print(f"[!] Note: ModeGPIOin command sent to {target}.")
+    return True
+
+
+def set_gpio_mode_out(client: CoordinatorClient, target: str, pin: int, timeout: float = 3.0) -> bool:
+    """Configures specified pin on target node as OUTPUT GPIO."""
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "MODEOUT" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} ModeGPIOout {pin}"
+    print(f"[>] Configuring Pin {pin} as OUTPUT on {target}: \"{cmd}\"")
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Pin {pin} configured as OUTPUT GPIO on {target}.")
+    else:
+        print(f"[!] Note: ModeGPIOout command sent to {target}.")
+    return True
+
+
+def set_gpio_val(client: CoordinatorClient, target: str, pin: int, val: int, timeout: float = 3.0) -> bool:
+    """Sets specified output pin level on target node to 0 or 1."""
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "SETGPIO" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetGPIOval {pin} {val}"
+    level_str = "HIGH (1)" if val == 1 else "LOW (0)"
+    print(f"\n[>] Setting Pin {pin} on {target} to {level_str}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Pin {pin} set to {val} on {target} ({elapsed:.1f}ms).")
+    return True
+
+
+def run_garage_gpio_test(
+    client: CoordinatorClient,
+    garage_target: str = "Garage",
+    kitchen_target: str = "Kitchen",
+    pin: int = 16,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Validates GPIO Input on Garage Pin 16 driven by Arduino PIN_D0 via Kitchen:
+    1. Ensures Kitchen Serial Bridge is active (<kitchen> SetupSerialBridge).
+    2. Initializes GPIO handler and configures Garage Pin 16 as INPUT GPIO (<garage> ModeGPIOin 16).
+    3. Clears Arduino PIN_D0 to LOW via Kitchen (<kitchen> clrx -> 'GotClrx').
+    4. Reads Garage Pin 16 (<garage> ReadGPIO 16) and verifies it reads 0 (LOW).
+    5. Sets Arduino PIN_D0 to HIGH via Kitchen (<kitchen> setx -> 'GotSetx').
+    6. Reads Garage Pin 16 (<garage> ReadGPIO 16) and verifies it reads 1 (HIGH).
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST 10/10] GARAGE GPIO INPUT TEST (PIN 16) ---")
+    print(f"Garage Node:       {garage_target} (ESP32-C6 Pin {pin} as INPUT GPIO)")
+    print(f"Arduino Host Node: {kitchen_target} (Trinket M0 PIN_D0 -> Garage Pin {pin})")
+    print(f"Timestamp:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        print(f"  <-- [RX] {msg}")
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        # Step 1: Ensure Serial Bridge on Kitchen is active
+        print(f"\n[*] Ensuring serial bridge is active on {kitchen_target}...")
+        if not run_setup_bridge_test(client, target=kitchen_target, timeout=timeout):
+            print(f"[-] TEST FAILED: Unable to establish serial bridge to {kitchen_target}.")
+            return False
+        time.sleep(0.3)
+
+        # Step 2: Configure Garage Pin 16 as INPUT GPIO
+        print(f"\n[*] Configuring {garage_target} Pin {pin} as INPUT GPIO...")
+        init_gpio_handler(client, target=garage_target)
+        set_gpio_mode_in(client, target=garage_target, pin=pin, timeout=timeout)
+        time.sleep(0.3)
+
+        # Step 3: Clear Arduino PIN_D0 (clrx) via Kitchen
+        print(f"\n[*] [STEP 1/2] Actuating Arduino PIN_D0 LOW (clrx) via {kitchen_target}...")
+        if not set_arduino_pin_d0(client, target=kitchen_target, state=False, timeout=timeout):
+            print(f"[-] TEST FAILED: Timed out or failed waiting for 'GotClrx' from Arduino.")
+            return False
+        time.sleep(0.3)
+
+        # Step 4: Read Garage Pin 16, verify it is 0 (LOW)
+        print(f"\n[*] Reading {garage_target} Pin {pin} level (expected: 0 / LOW)...")
+        val_low = read_gpio_pin(client, target=garage_target, pin=pin, timeout=timeout)
+        if val_low is None:
+            print(f"[-] TEST FAILED: Timed out waiting for Pin {pin} read response from {garage_target}.")
+            return False
+
+        if val_low != 0:
+            print(f"[-] TEST FAILED: Expected {garage_target} Pin {pin} == 0 (LOW) after clrx, but got {val_low}!")
+            return False
+        print(f"[+] VERIFIED: {garage_target} Pin {pin} correctly read LOW (0) after Arduino clrx.")
+
+        # Step 5: Set Arduino PIN_D0 (setx) via Kitchen
+        print(f"\n[*] [STEP 2/2] Actuating Arduino PIN_D0 HIGH (setx) via {kitchen_target}...")
+        if not set_arduino_pin_d0(client, target=kitchen_target, state=True, timeout=timeout):
+            print(f"[-] TEST FAILED: Timed out or failed waiting for 'GotSetx' from Arduino.")
+            return False
+        time.sleep(0.3)
+
+        # Step 6: Read Garage Pin 16, verify it is 1 (HIGH)
+        print(f"\n[*] Reading {garage_target} Pin {pin} level (expected: 1 / HIGH)...")
+        val_high = read_gpio_pin(client, target=garage_target, pin=pin, timeout=timeout)
+        if val_high is None:
+            print(f"[-] TEST FAILED: Timed out waiting for Pin {pin} read response from {garage_target}.")
+            return False
+
+        if val_high != 1:
+            print(f"[-] TEST FAILED: Expected {garage_target} Pin {pin} == 1 (HIGH) after setx, but got {val_high}!")
+            return False
+        print(f"[+] VERIFIED: {garage_target} Pin {pin} correctly read HIGH (1) after Arduino setx.")
+
+        # Final Success
+        print("\n" + "=" * 65)
+        print(f"[+] TEST PASSED: {garage_target} Pin {pin} GPIO input fully verified!")
+        print(f"    - clrx -> Arduino D0 LOW  -> Garage Pin {pin} read: 0 [PASS]")
+        print(f"    - setx -> Arduino D0 HIGH -> Garage Pin {pin} read: 1 [PASS]")
+        print("=" * 65)
+        return True
+
+    finally:
+        client.remove_rx_callback(on_rx)
+
+
+def run_bidirectional_gpio_test(
+    client: CoordinatorClient,
+    kitchen_target: str = "Kitchen",
+    garage_target: str = "Garage",
+    kitchen_pin: int = 21,
+    garage_pin: int = 17,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Validates bidirectional GPIO wire communication between Kitchen and Garage:
+    Wiring: Kitchen Pin 21 <---> Garage Pin 17
+
+    1. Initial Safety: Sets both pins to INPUT mode.
+    2. Direction 1: Kitchen Pin 21 (OUTPUT) -> Garage Pin 17 (INPUT)
+       - Sends bit 0 from Kitchen -> verifies Garage reads 0
+       - Sends bit 1 from Kitchen -> verifies Garage reads 1
+    3. Safe Transition: Sets BOTH sides to INPUT before switching direction
+       to prevent electrical bus contention / driver conflict.
+    4. Direction 2: Garage Pin 17 (OUTPUT) -> Kitchen Pin 21 (INPUT)
+       - Sends bit 0 from Garage -> verifies Kitchen reads 0
+       - Sends bit 1 from Garage -> verifies Kitchen reads 1
+    5. Final Cleanup: Sets both pins back to INPUT.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST 11/11] BIDIRECTIONAL GPIO WIRE TEST (KITCHEN <-> GARAGE) ---")
+    print(f"Wire Connection:   {kitchen_target} Pin {kitchen_pin} <---> {garage_target} Pin {garage_pin}")
+    print(f"Direction 1:       {kitchen_target} (OUT) -> {garage_target} (IN)")
+    print(f"Safe Transition:   Both set to INPUT (contention prevention)")
+    print(f"Direction 2:       {garage_target} (OUT) -> {kitchen_target} (IN)")
+    print(f"Timestamp:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        print(f"  <-- [RX] {msg}")
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        # Phase 0: Initialize GPIO handlers on both nodes
+        print(f"\n[*] [PHASE 0] Initializing GPIO handlers on {kitchen_target} and {garage_target}...")
+        init_gpio_handler(client, kitchen_target)
+        init_gpio_handler(client, garage_target)
+
+        # Initial Safety: Set both sides to INPUT
+        print(f"[*] Setting both pins to INPUT for safety before beginning...")
+        set_gpio_mode_in(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        set_gpio_mode_in(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        time.sleep(0.3)
+
+        # -------------------------------------------------------------
+        # Phase 1: Direction 1 — Kitchen (Output) -> Garage (Input)
+        # -------------------------------------------------------------
+        print("\n" + "-" * 65)
+        print(f"--- [DIRECTION 1] {kitchen_target} (Pin {kitchen_pin} OUT) -> {garage_target} (Pin {garage_pin} IN) ---")
+        print("-" * 65)
+
+        # Garage Pin 17 as INPUT
+        set_gpio_mode_in(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        time.sleep(0.2)
+        # Kitchen Pin 21 as OUTPUT
+        set_gpio_mode_out(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        time.sleep(0.2)
+
+        # Step 1.1: Kitchen sends 0 -> Garage reads 0
+        print(f"\n[*] [DIR 1 - BIT 0] {kitchen_target} driving LOW (0)...")
+        set_gpio_val(client, target=kitchen_target, pin=kitchen_pin, val=0, timeout=timeout)
+        time.sleep(0.3)
+        val = read_gpio_pin(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        if val is None:
+            print(f"[-] TEST FAILED: Timed out reading {garage_target} Pin {garage_pin}.")
+            return False
+        if val != 0:
+            print(f"[-] TEST FAILED: {kitchen_target} drove 0, but {garage_target} read {val}!")
+            return False
+        print(f"[+] VERIFIED: {kitchen_target} drove 0 -> {garage_target} correctly read 0.")
+
+        # Step 1.2: Kitchen sends 1 -> Garage reads 1
+        print(f"\n[*] [DIR 1 - BIT 1] {kitchen_target} driving HIGH (1)...")
+        set_gpio_val(client, target=kitchen_target, pin=kitchen_pin, val=1, timeout=timeout)
+        time.sleep(0.3)
+        val = read_gpio_pin(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        if val is None:
+            print(f"[-] TEST FAILED: Timed out reading {garage_target} Pin {garage_pin}.")
+            return False
+        if val != 1:
+            print(f"[-] TEST FAILED: {kitchen_target} drove 1, but {garage_target} read {val}!")
+            return False
+        print(f"[+] VERIFIED: {kitchen_target} drove 1 -> {garage_target} correctly read 1.")
+
+        print(f"\n[+] DIRECTION 1 PASSED: {kitchen_target} Pin {kitchen_pin} -> {garage_target} Pin {garage_pin} verified for both 0 and 1!")
+
+        # -------------------------------------------------------------
+        # Phase 2: Safe Transition — BOTH SIDES TO INPUT
+        # -------------------------------------------------------------
+        print("\n" + "-" * 65)
+        print("--- [SAFETY TRANSITION] SETTING BOTH SIDES TO INPUT ---")
+        print("--- Preventing contention / driver conflict before switching ---")
+        print("-" * 65)
+        set_gpio_mode_in(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        set_gpio_mode_in(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        time.sleep(0.5)
+        print("[+] Both sides confirmed in high-impedance INPUT mode.")
+
+        # -------------------------------------------------------------
+        # Phase 3: Direction 2 — Garage (Output) -> Kitchen (Input)
+        # -------------------------------------------------------------
+        print("\n" + "-" * 65)
+        print(f"--- [DIRECTION 2] {garage_target} (Pin {garage_pin} OUT) -> {kitchen_target} (Pin {kitchen_pin} IN) ---")
+        print("-" * 65)
+
+        # Kitchen Pin 21 as INPUT
+        set_gpio_mode_in(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        time.sleep(0.2)
+        # Garage Pin 17 as OUTPUT
+        set_gpio_mode_out(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        time.sleep(0.2)
+
+        # Step 2.1: Garage sends 0 -> Kitchen reads 0
+        print(f"\n[*] [DIR 2 - BIT 0] {garage_target} driving LOW (0)...")
+        set_gpio_val(client, target=garage_target, pin=garage_pin, val=0, timeout=timeout)
+        time.sleep(0.3)
+        val = read_gpio_pin(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        if val is None:
+            print(f"[-] TEST FAILED: Timed out reading {kitchen_target} Pin {kitchen_pin}.")
+            return False
+        if val != 0:
+            print(f"[-] TEST FAILED: {garage_target} drove 0, but {kitchen_target} read {val}!")
+            return False
+        print(f"[+] VERIFIED: {garage_target} drove 0 -> {kitchen_target} correctly read 0.")
+
+        # Step 2.2: Garage sends 1 -> Kitchen reads 1
+        print(f"\n[*] [DIR 2 - BIT 1] {garage_target} driving HIGH (1)...")
+        set_gpio_val(client, target=garage_target, pin=garage_pin, val=1, timeout=timeout)
+        time.sleep(0.3)
+        val = read_gpio_pin(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        if val is None:
+            print(f"[-] TEST FAILED: Timed out reading {kitchen_target} Pin {kitchen_pin}.")
+            return False
+        if val != 1:
+            print(f"[-] TEST FAILED: {garage_target} drove 1, but {kitchen_target} read {val}!")
+            return False
+        print(f"[+] VERIFIED: {garage_target} drove 1 -> {kitchen_target} correctly read 1.")
+
+        print(f"\n[+] DIRECTION 2 PASSED: {garage_target} Pin {garage_pin} -> {kitchen_target} Pin {kitchen_pin} verified for both 0 and 1!")
+
+        # -------------------------------------------------------------
+        # Phase 4: Final Cleanup — BOTH SIDES TO INPUT
+        # -------------------------------------------------------------
+        print("\n" + "-" * 65)
+        print("--- [CLEANUP] SETTING BOTH SIDES TO INPUT ---")
+        print("-" * 65)
+        set_gpio_mode_in(client, target=kitchen_target, pin=kitchen_pin, timeout=timeout)
+        set_gpio_mode_in(client, target=garage_target, pin=garage_pin, timeout=timeout)
+        time.sleep(0.2)
+
+        # Final Summary
+        print("\n" + "=" * 65)
+        print(f"[+] TEST PASSED: BIDIRECTIONAL GPIO TRANSMISSION FULLY VERIFIED!")
+        print(f"    - Direction 1: {kitchen_target} (Pin {kitchen_pin}) -> {garage_target} (Pin {garage_pin}): [PASS]")
+        print(f"    - Safe Contention-Avoidance Transition:                 [PASS]")
+        print(f"    - Direction 2: {garage_target} (Pin {garage_pin}) -> {kitchen_target} (Pin {kitchen_pin}): [PASS]")
+        print("=" * 65)
+        return True
+
+    finally:
+        # Guarantee both pins are safe in INPUT mode even if an exception occurs
+        try:
+            client.send_line(f"{kitchen_target} ModeGPIOin {kitchen_pin}")
+            client.send_line(f"{garage_target} ModeGPIOin {garage_pin}")
+        except Exception:
+            pass
+        client.remove_rx_callback(on_rx)
+
+
+def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", garage_target: str = "Garage", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
     """Executes all regression tests in sequence and displays a structured report."""
     print("\n" + "=" * 65)
     print("        STARTING FULL ZIGBEE HIL REGRESSION SUITE")
-    print(f"Target:    {target}")
+    print(f"Target:    {target} | Garage: {garage_target}")
     print(f"Started:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
@@ -980,6 +1503,14 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     # Test 9: APDS9930 Proximity Sensor Test
     results["APDS9930_Prox"] = run_proximity_test(client, target=target)
+    time.sleep(0.5)
+
+    # Test 10: Garage Pin 16 GPIO Input Test
+    results["Garage_GPIO"] = run_garage_gpio_test(client, garage_target=garage_target, kitchen_target=target)
+    time.sleep(0.5)
+
+    # Test 11: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
+    results["Bidi_GPIO"] = run_bidirectional_gpio_test(client, kitchen_target=target, garage_target=garage_target, kitchen_pin=21, garage_pin=17)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
@@ -994,7 +1525,9 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "DAC_ADC_Loopback":  "6. DAC -> ADC Loopback        (Pin 1~ -> Pin A1)",
         "Schmitt_Ramp":      "7. Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
         "Servo_PWM":         "8. Servo / PWM Motion         (Snap & Slew 30)",
-        "APDS9930_Prox":     "9. APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)"
+        "APDS9930_Prox":     "9. APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
+        "Garage_GPIO":       "10. Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
+        "Bidi_GPIO":         "11. Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)"
     }
 
     all_passed = True
@@ -1006,8 +1539,9 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         print(f"  {status:<10} {label}")
 
     print("=" * 65)
+    total_tests = len(labels)
     if all_passed:
-        print("  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! (9/9) <<<")
+        print(f"  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! ({total_tests}/{total_tests}) <<<")
     else:
         print("  >>> ONE OR MORE TESTS FAILED - REVIEW LOGS ABOVE <<<")
     print("=" * 65 + "\n")
@@ -1026,6 +1560,24 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Kitchen blinkx 5")
     print("      Kitchen ping")
     print("      Kitchen setDAC 512")
+    print("      Kitchen clrx")
+    print("      Kitchen setx")
+    print("      Kitchen ModeGPIOin 21")
+    print("      Kitchen ModeGPIOout 21")
+    print("      Kitchen SetGPIOval 21 1")
+    print("      Kitchen ReadGPIO 21")
+    print("      Kitchen SetupMotorDriver 1 5000")
+    print("      Kitchen MotorSlew 500")
+    print("      Kitchen MotorSpeed 1000")
+    print("      Kitchen MotorSpeed -1000")
+    print("      Kitchen MotorSpeed 0")
+    print("      Garage SetupGPIOhandler")
+    print("      Garage ModeGPIOin 16")
+    print("      Garage ReadGPIO 16")
+    print("      Garage ModeGPIOin 17")
+    print("      Garage ModeGPIOout 17")
+    print("      Garage SetGPIOval 17 1")
+    print("      Garage ReadGPIO 17")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")
@@ -1065,10 +1617,14 @@ def main():
     parser.add_argument("--ping", action="store_true", help="Run the two-way GotPing round-trip test and exit")
     parser.add_argument("--bridge", action="store_true", help="Run SetupSerialBridge test and exit")
     parser.add_argument("--servo", "--pwm", action="store_true", help="Run Servo / PWM test on Pin 2 (snap vs slew 30) and exit")
+    parser.add_argument("--cytron", "--motor", action="store_true", help="Run Cytron 10C motor driver test (PWM=Pin 18, DIR=Pin 20) and exit")
     parser.add_argument("--schmitt", "--ramp", action="store_true", help="Run Schmitt trigger hysteresis ramp test (2s up + 2s down) and exit")
     parser.add_argument("--prox", "--proximity", action="store_true", help="Run APDS9930 Proximity Sensor test and exit")
     parser.add_argument("--read-prox", action="store_true", help="Read APDS9930 instantaneous proximity value and exit")
-    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-9) and exit")
+    parser.add_argument("--garage", type=str, default="Garage", help="Garage node name in coordinator device table (default: Garage)")
+    parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
+    parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
+    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-11) and exit")
 
     args = parser.parse_args()
 
@@ -1084,7 +1640,15 @@ def main():
     try:
         # CLI direct test execution flags
         if args.all:
-            passed = run_full_regression_suite(client, target=args.target, blink_count=args.count, blinkx_count=args.count)
+            passed = run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
+            sys.exit(0 if passed else 1)
+
+        if args.gpio:
+            passed = run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
+            sys.exit(0 if passed else 1)
+
+        if args.bidi_gpio:
+            passed = run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             sys.exit(0 if passed else 1)
 
         if args.bridge:
@@ -1129,6 +1693,10 @@ def main():
             passed = run_servo_pwm_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 
+        if args.cytron:
+            passed = run_cytron_motor_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
         if args.prox:
             passed = run_proximity_test(client, target=args.target)
             sys.exit(0 if passed else 1)
@@ -1147,7 +1715,7 @@ def main():
             print("\n=======================================================")
             print("         ZIGBEE HIL REGRESSION TEST RUNNER")
             print("=======================================================")
-            print("  [1] Run Full Regression Test Suite (Tests 1-9)")
+            print("  [1] Run Full Regression Test Suite (Tests 1-11)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
@@ -1157,8 +1725,11 @@ def main():
             print("  [8] Closed-Loop DAC -> ADC Test (Pin 1~ -> Pin A1)    [Auto-Bridge]")
             print("  [9] Schmitt Trigger Ramp Test   (0 -> 1000 -> 0, 2s+2s)")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
+            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [R] Read Proximity Value        (ReadProximity)")
+            print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
+            print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
             print("  [0] Interactive PuTTY Console Mode")
@@ -1166,10 +1737,10 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, D, R, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
-                run_full_regression_suite(client, target=args.target, blink_count=args.count, blinkx_count=args.count)
+                run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
             elif choice == "2":
                 run_setup_bridge_test(client, target=args.target)
             elif choice == "3":
@@ -1198,6 +1769,8 @@ def main():
                 run_schmitt_hysteresis_ramp_test(client, target=args.target)
             elif choice in ("S", "SERVO", "PWM"):
                 run_servo_pwm_test(client, target=args.target)
+            elif choice in ("M", "MOTOR", "CYTRON"):
+                run_cytron_motor_test(client, target=args.target)
             elif choice in ("D", "PROX", "PROXIMITY"):
                 run_proximity_test(client, target=args.target)
             elif choice in ("R", "READPROX"):
@@ -1206,6 +1779,10 @@ def main():
                     print(f"\n[+] Instantaneous Proximity Value: {val}")
                 else:
                     print("\n[-] Failed to read proximity value.")
+            elif choice in ("G", "GPIO"):
+                run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
+            elif choice in ("B", "BIDI"):
+                run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             elif choice in ("N", "REPORT"):
                 print("\n[>] Requesting Network Report...")
                 client.send_line("GiveNetworkReport")

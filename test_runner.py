@@ -1511,6 +1511,10 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     # Test 11: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
     results["Bidi_GPIO"] = run_bidirectional_gpio_test(client, kitchen_target=target, garage_target=garage_target, kitchen_pin=21, garage_pin=17)
+    time.sleep(0.5)
+
+    # Test 12: Cytron 10C Motor Driver Test (Pin 18 PWM, Pin 20 DIR)
+    results["Cytron_Motor"] = run_cytron_motor_test(client, target=target)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
@@ -1527,7 +1531,8 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "Servo_PWM":         "8. Servo / PWM Motion         (Snap & Slew 30)",
         "APDS9930_Prox":     "9. APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
         "Garage_GPIO":       "10. Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
-        "Bidi_GPIO":         "11. Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)"
+        "Bidi_GPIO":         "11. Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
+        "Cytron_Motor":      "12. Cytron 10C Motor Driver   (Pin 18 PWM, Pin 20 DIR: 2s FWD, 4s REV, 1s Pause, Snap 0)"
     }
 
     all_passed = True
@@ -1624,7 +1629,7 @@ def main():
     parser.add_argument("--garage", type=str, default="Garage", help="Garage node name in coordinator device table (default: Garage)")
     parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
-    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-11) and exit")
+    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
 
     args = parser.parse_args()
 
@@ -1715,7 +1720,7 @@ def main():
             print("\n=======================================================")
             print("         ZIGBEE HIL REGRESSION TEST RUNNER")
             print("=======================================================")
-            print("  [1] Run Full Regression Test Suite (Tests 1-11)")
+            print("  [1] Run Full Regression Test Suite (Tests 1-12)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")

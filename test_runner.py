@@ -28,8 +28,13 @@ class CoordinatorClient:
         self.rx_callbacks = []
         self._lock = threading.Lock()
 
-    def connect(self) -> bool:
+    def connect(self, verbose: bool = True) -> bool:
         try:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
             self.ser = serial.Serial()
             self.ser.port = self.port
             self.ser.baudrate = self.baudrate
@@ -45,11 +50,31 @@ class CoordinatorClient:
             self._running = True
             self._rx_thread = threading.Thread(target=self._read_loop, daemon=True)
             self._rx_thread.start()
-            print(f"[+] Connected to Coordinator on {self.port} @ {self.baudrate} baud.")
+            if verbose:
+                print(f"[+] Connected to Coordinator on {self.port} @ {self.baudrate} baud.")
             return True
         except serial.SerialException as ex:
-            print(f"[-] Failed to open serial port {self.port}: {ex}")
+            if verbose:
+                print(f"[-] Failed to open serial port {self.port}: {ex}")
             return False
+
+    def reconnect(self, timeout: float = 12.0) -> bool:
+        """Closes and re-opens the serial connection after a coordinator reboot."""
+        self.close()
+        time.sleep(0.8)
+        t_end = time.time() + timeout
+        print(f"[*] Waiting for Coordinator on {self.port} to reboot and reconnect...")
+        while time.time() < t_end:
+            try:
+                if self.connect(verbose=False):
+                    print(f"[+] Successfully reconnected to Coordinator on {self.port}!")
+                    time.sleep(0.4)
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.4)
+        print(f"[-] Failed to reconnect to {self.port} within {timeout:.1f}s.")
+        return False
 
     def wait_for_node(self, target: str = "Kitchen", timeout: float = 12.0) -> bool:
         """Verifies that the target node is online on the Zigbee mesh."""
@@ -79,7 +104,10 @@ class CoordinatorClient:
     def close(self):
         self._running = False
         if self.ser and self.ser.is_open:
-            self.ser.close()
+            try:
+                self.ser.close()
+            except Exception:
+                pass
             print(f"[*] Port {self.port} closed.")
 
     def send_line(self, line: str):
@@ -1493,6 +1521,479 @@ def run_bidirectional_gpio_test(
         client.remove_rx_callback(on_rx)
 
 
+# =============================================================================
+# MESH RESILIENCE & TOPOLOGY RECOVERY TEST SUITE
+# =============================================================================
+
+def get_network_report(client: CoordinatorClient, timeout: float = 4.0) -> dict:
+    """
+    Sends 'GiveNetworkReport' to Coordinator and parses the response into a structured dict.
+    Returns:
+        dict[str, dict]: Mapping node name to its properties:
+        {
+            'Kitchen': {
+                'name': 'Kitchen',
+                'ieee': '0xB43A45FFFE8AC640',
+                'short': '0x0001',
+                'online': True,
+                'type': 'END_DEVICE',
+                'lqi': 204,
+                'remote_lqi': 218,
+                'rf_status': 'OK',
+                'age': 0,
+                'route': 'YES'
+            }, ...
+        }
+    """
+    nodes = {}
+    in_report = False
+    done_event = threading.Event()
+
+    def on_rx(msg: str):
+        nonlocal in_report
+        clean = msg.strip()
+        if "NETWORK_REPORT_BEGIN" in clean:
+            in_report = True
+            return
+        if "NETWORK_REPORT_END" in clean:
+            in_report = False
+            done_event.set()
+            return
+        if in_report and "," in clean and not clean.startswith("NAME,"):
+            parts = [p.strip() for p in clean.split(",")]
+            if len(parts) >= 10:
+                name = parts[0]
+                nodes[name] = {
+                    "name": name,
+                    "ieee": parts[1],
+                    "short": parts[2],
+                    "online": (parts[3] == "1"),
+                    "type": parts[4],
+                    "lqi": int(parts[5]) if parts[5].isdigit() else 0,
+                    "remote_lqi": int(parts[6]) if parts[6].isdigit() else -1,
+                    "rf_status": parts[7],
+                    "age": int(parts[8]) if parts[8].isdigit() else 0,
+                    "route": parts[9]
+                }
+
+    client.add_rx_callback(on_rx)
+    try:
+        client.send_line("GiveNetworkReport")
+        done_event.wait(timeout=timeout)
+    finally:
+        client.remove_rx_callback(on_rx)
+
+    return nodes
+
+
+def wait_for_mesh_established(
+    client: CoordinatorClient,
+    expected_nodes: list = None,
+    timeout: float = 15.0,
+    poll_interval: float = 1.0
+) -> tuple:
+    """
+    Polls get_network_report until all expected_nodes are online with valid short address and route == 'YES'.
+    Returns (success: bool, final_report: dict, elapsed_sec: float).
+    """
+    if expected_nodes is None:
+        expected_nodes = ["Kitchen", "Garage"]
+
+    t_start = time.time()
+    t_end = t_start + timeout
+    last_report = {}
+
+    while time.time() < t_end:
+        report = get_network_report(client, timeout=3.5)
+        last_report = report
+
+        all_online = True
+        for node in expected_nodes:
+            entry = report.get(node)
+            if not entry or not entry.get("online") or entry.get("route") != "YES" or entry.get("lqi", 0) <= 0:
+                all_online = False
+                break
+
+        if all_online:
+            elapsed = time.time() - t_start
+            return True, report, elapsed
+
+        time.sleep(poll_interval)
+
+    elapsed = time.time() - t_start
+    return False, last_report, elapsed
+
+
+def verify_node_bidirectional(client: CoordinatorClient, target: str, timeout: float = 3.0) -> tuple:
+    """
+    Sends an active command ('<target> blink 1') to the node and verifies end-to-end ACK.
+    Returns (success: bool, rtt_ms: float, response_msg: str).
+    """
+    got_reply = threading.Event()
+    resp_text = ""
+    t_start = time.time()
+
+    def on_rx(msg: str):
+        nonlocal resp_text
+        if f"< {target}:" in msg and ("ACK" in msg or "PONG" in msg):
+            resp_text = msg.strip()
+            got_reply.set()
+
+    client.add_rx_callback(on_rx)
+    try:
+        client.send_line(f"{target} blink 1")
+        passed = got_reply.wait(timeout=timeout)
+        rtt_ms = (time.time() - t_start) * 1000.0
+        return passed, rtt_ms, resp_text
+    finally:
+        client.remove_rx_callback(on_rx)
+
+
+def reset_node(client: CoordinatorClient, target: str, port: str = None) -> bool:
+    """
+    Resets a node. If target is 'Coordinator', sends ResetCoordinator.
+    Otherwise sends OTA reboot command or pulses hardware DTR/RTS if port is given.
+    """
+    if target.lower() in ("coordinator", "coord"):
+        print("[*] Sending ResetCoordinator command...")
+        client.send_line("ResetCoordinator")
+        return True
+
+    if port:
+        try:
+            print(f"[*] Pulsing hardware reset (DTR/RTS) on {target} ({port})...")
+            p = serial.Serial(port, 115200, timeout=0.1)
+            p.dtr = False
+            p.rts = True
+            time.sleep(0.1)
+            p.rts = False
+            p.close()
+            time.sleep(0.2)
+            print(f"[+] Hardware reset pulse sent to {target} on {port}.")
+            return True
+        except Exception as ex:
+            print(f"[!] Hardware reset on {port} failed ({ex}); falling back to OTA reboot command.")
+
+    print(f"[*] Sending OTA reboot command: '{target} reboot'...")
+    client.send_line(f"{target} reboot")
+    return True
+
+
+def run_mesh_subtest_all_nodes(
+    client: CoordinatorClient,
+    kitchen_target: str = "Kitchen",
+    garage_target: str = "Garage",
+    kitchen_port: str = None,
+    garage_port: str = None,
+    timeout: float = 20.0
+) -> bool:
+    """
+    Sub-test 1: Resets all three nodes (Coordinator, Kitchen, Garage) and
+    verifies that the full mesh topology and bidirectional routing re-establishes.
+    """
+    print("\n" + "=" * 65)
+    print("  MESH SUB-TEST 1: RESET ALL THREE NODES (FULL MESH CYCLE)")
+    print(f"  Nodes: Coordinator ({client.port}), {kitchen_target}, {garage_target}")
+    print("=" * 65)
+
+    t_cycle_start = time.time()
+
+    # Step 1: Issue reboots to child nodes first so commands are dispatched across mesh
+    print(f"[*] Step 1: Dispatching reboot to '{kitchen_target}'...")
+    reset_node(client, kitchen_target, kitchen_port)
+    time.sleep(0.1)
+
+    print(f"[*] Step 2: Dispatching reboot to '{garage_target}'...")
+    reset_node(client, garage_target, garage_port)
+    time.sleep(0.2)
+
+    # Step 3: Reset Coordinator
+    print("[*] Step 3: Triggering Coordinator restart (ResetCoordinator)...")
+    client.send_line("ResetCoordinator")
+    time.sleep(0.3)
+
+    # Step 4: Reconnect to Coordinator port
+    if not client.reconnect(timeout=12.0):
+        print("[-] FAILED: Could not reconnect to Coordinator after reset!")
+        return False
+
+    # Step 5: Wait for full mesh re-establishment
+    print(f"[*] Step 4: Waiting for full mesh re-establishment (up to {timeout:.1f}s)...")
+    mesh_ok, report, elapsed = wait_for_mesh_established(
+        client,
+        expected_nodes=[kitchen_target, garage_target],
+        timeout=timeout,
+        poll_interval=1.0
+    )
+
+    if not mesh_ok:
+        print(f"[-] FAILED: Mesh did not re-establish within {timeout:.1f}s!")
+        print(f"    Report state: {report}")
+        return False
+
+    print(f"[+] Full mesh topology re-established in {elapsed:.2f}s!")
+
+    # Step 6: Verify bidirectional communication with active command
+    print("[*] Step 5: Verifying active bidirectional messaging...")
+    k_ok, k_rtt, k_resp = verify_node_bidirectional(client, kitchen_target)
+    g_ok, g_rtt, g_resp = verify_node_bidirectional(client, garage_target)
+
+    # Print results table
+    print("\n" + "-" * 65)
+    print("NODE            SHORT    ONLINE  LQI   REM_LQI  ROUTE  CMD RTT   STATUS")
+    print("-" * 65)
+    for tgt, ok, rtt in [(kitchen_target, k_ok, k_rtt), (garage_target, g_ok, g_rtt)]:
+        entry = report.get(tgt, {})
+        short_addr = entry.get("short", "N/A")
+        online_str = "YES" if entry.get("online") else "NO"
+        lqi_val = str(entry.get("lqi", 0))
+        rem_lqi = str(entry.get("remote_lqi", -1))
+        route_str = entry.get("route", "NO")
+        rtt_str = f"{rtt:.0f}ms" if ok else "TIMEOUT"
+        stat_str = "[PASS]" if (entry.get("online") and ok) else "[FAIL]"
+        print(f"{tgt:<15} {short_addr:<8} {online_str:<7} {lqi_val:<5} {rem_lqi:<8} {route_str:<6} {rtt_str:<9} {stat_str}")
+    print("-" * 65)
+
+    all_passed = k_ok and g_ok
+    if all_passed:
+        total_time = time.time() - t_cycle_start
+        print(f"[+] SUB-TEST 1 PASSED: Full 3-node mesh successfully re-established in {total_time:.2f}s!\n")
+    else:
+        print("[-] SUB-TEST 1 FAILED: One or more nodes failed bidirectional verification.\n")
+
+    return all_passed
+
+
+def run_mesh_subtest_garage_only(
+    client: CoordinatorClient,
+    garage_target: str = "Garage",
+    kitchen_target: str = "Kitchen",
+    garage_port: str = None,
+    timeout: float = 14.0
+) -> bool:
+    """
+    Sub-test 2: Resets only the Garage node and verifies dynamic mesh re-establishment
+    while Coordinator and Kitchen remain continuously operational.
+    """
+    print("\n" + "=" * 65)
+    print("  MESH SUB-TEST 2: RESET GARAGE NODE ONLY (PARTIAL HEAL)")
+    print(f"  Target: {garage_target} (Verifying {kitchen_target} remains unaffected)")
+    print("=" * 65)
+
+    # Step 1: Verify baseline
+    print("[*] Step 1: Checking baseline mesh health...")
+    pre_report = get_network_report(client, timeout=3.5)
+    if not pre_report.get(kitchen_target, {}).get("online"):
+        print(f"[!] Warning: '{kitchen_target}' not online prior to test.")
+
+    t_cycle_start = time.time()
+
+    # Step 2: Reset Garage
+    print(f"[*] Step 2: Resetting '{garage_target}'...")
+    reset_node(client, garage_target, garage_port)
+    time.sleep(1.2)  # Allow reboot to initiate and complete
+
+    # Step 3: Wait for Garage to re-announce and re-establish
+    print(f"[*] Step 3: Waiting for '{garage_target}' route re-establishment...")
+    mesh_ok, report, elapsed = wait_for_mesh_established(
+        client,
+        expected_nodes=[garage_target],
+        timeout=timeout,
+        poll_interval=1.0
+    )
+
+    if not mesh_ok:
+        print(f"[-] FAILED: '{garage_target}' did not re-establish within {timeout:.1f}s!")
+        return False
+
+    print(f"[+] '{garage_target}' re-established route in {elapsed:.2f}s!")
+
+    # Step 4: Verify bidirectional traffic to both nodes
+    print(f"[*] Step 4: Verifying bidirectional messaging...")
+    g_ok, g_rtt, g_resp = verify_node_bidirectional(client, garage_target)
+    k_ok, k_rtt, k_resp = verify_node_bidirectional(client, kitchen_target)
+
+    # Print summary
+    print("\n" + "-" * 65)
+    print("NODE            SHORT    ONLINE  LQI   REM_LQI  ROUTE  CMD RTT   STATUS")
+    print("-" * 65)
+    for tgt, ok, rtt in [(garage_target, g_ok, g_rtt), (kitchen_target, k_ok, k_rtt)]:
+        entry = report.get(tgt, {})
+        short_addr = entry.get("short", "N/A")
+        online_str = "YES" if entry.get("online") else "NO"
+        lqi_val = str(entry.get("lqi", 0))
+        rem_lqi = str(entry.get("remote_lqi", -1))
+        route_str = entry.get("route", "NO")
+        rtt_str = f"{rtt:.0f}ms" if ok else "TIMEOUT"
+        stat_str = "[PASS]" if (entry.get("online") and ok) else "[FAIL]"
+        print(f"{tgt:<15} {short_addr:<8} {online_str:<7} {lqi_val:<5} {rem_lqi:<8} {route_str:<6} {rtt_str:<9} {stat_str}")
+    print("-" * 65)
+
+    all_passed = g_ok and k_ok and (report.get(garage_target, {}).get("online", False))
+    if all_passed:
+        total_time = time.time() - t_cycle_start
+        print(f"[+] SUB-TEST 2 PASSED: '{garage_target}' cleanly re-established in {total_time:.2f}s!\n")
+    else:
+        print(f"[-] SUB-TEST 2 FAILED: '{garage_target}' failed recovery verification.\n")
+
+    return all_passed
+
+
+def run_mesh_subtest_both_nodes(
+    client: CoordinatorClient,
+    kitchen_target: str = "Kitchen",
+    garage_target: str = "Garage",
+    kitchen_port: str = None,
+    garage_port: str = None,
+    timeout: float = 16.0
+) -> bool:
+    """
+    Sub-test 3: Resets both Kitchen and Garage nodes simultaneously while
+    the Coordinator stays active, and verifies both re-announce and re-join.
+    """
+    print("\n" + "=" * 65)
+    print("  MESH SUB-TEST 3: RESET BOTH KITCHEN AND GARAGE (END-NODES REBOOT)")
+    print(f"  Target: Reset {kitchen_target} and {garage_target} | Coord remains up")
+    print("=" * 65)
+
+    t_cycle_start = time.time()
+
+    # Step 1: Dispatch reboots to both nodes
+    print(f"[*] Step 1: Resetting '{kitchen_target}'...")
+    reset_node(client, kitchen_target, kitchen_port)
+    time.sleep(0.1)
+
+    print(f"[*] Step 2: Resetting '{garage_target}'...")
+    reset_node(client, garage_target, garage_port)
+    time.sleep(1.2)  # Allow reboot cycles to initiate and complete
+
+    # Step 2: Wait for both nodes to re-announce and re-establish
+    print(f"[*] Step 3: Waiting for both '{kitchen_target}' and '{garage_target}' routes...")
+    mesh_ok, report, elapsed = wait_for_mesh_established(
+        client,
+        expected_nodes=[kitchen_target, garage_target],
+        timeout=timeout,
+        poll_interval=1.0
+    )
+
+    if not mesh_ok:
+        print(f"[-] FAILED: Nodes did not both re-establish within {timeout:.1f}s!")
+        print(f"    Report state: {report}")
+        return False
+
+    print(f"[+] Both nodes re-established routes in {elapsed:.2f}s!")
+
+    # Step 3: Verify bidirectional traffic to both nodes
+    print("[*] Step 4: Verifying bidirectional messaging on both nodes...")
+    k_ok, k_rtt, k_resp = verify_node_bidirectional(client, kitchen_target)
+    g_ok, g_rtt, g_resp = verify_node_bidirectional(client, garage_target)
+
+    # Print summary
+    print("\n" + "-" * 65)
+    print("NODE            SHORT    ONLINE  LQI   REM_LQI  ROUTE  CMD RTT   STATUS")
+    print("-" * 65)
+    for tgt, ok, rtt in [(kitchen_target, k_ok, k_rtt), (garage_target, g_ok, g_rtt)]:
+        entry = report.get(tgt, {})
+        short_addr = entry.get("short", "N/A")
+        online_str = "YES" if entry.get("online") else "NO"
+        lqi_val = str(entry.get("lqi", 0))
+        rem_lqi = str(entry.get("remote_lqi", -1))
+        route_str = entry.get("route", "NO")
+        rtt_str = f"{rtt:.0f}ms" if ok else "TIMEOUT"
+        stat_str = "[PASS]" if (entry.get("online") and ok) else "[FAIL]"
+        print(f"{tgt:<15} {short_addr:<8} {online_str:<7} {lqi_val:<5} {rem_lqi:<8} {route_str:<6} {rtt_str:<9} {stat_str}")
+    print("-" * 65)
+
+    all_passed = k_ok and g_ok
+    if all_passed:
+        total_time = time.time() - t_cycle_start
+        print(f"[+] SUB-TEST 3 PASSED: Both child nodes re-established in {total_time:.2f}s!\n")
+    else:
+        print("[-] SUB-TEST 3 FAILED: One or more child nodes failed bidirectional verification.\n")
+
+    return all_passed
+
+
+def run_mesh_resilience_test(
+    client: CoordinatorClient,
+    kitchen_target: str = "Kitchen",
+    garage_target: str = "Garage",
+    kitchen_port: str = None,
+    garage_port: str = None
+) -> bool:
+    """
+    Executes the complete 3-stage Mesh Resilience & Recovery Test Suite:
+      - Sub-Test 1: Reset all three nodes (Coordinator + Kitchen + Garage)
+      - Sub-Test 2: Reset Garage node only
+      - Sub-Test 3: Reset both Kitchen and Garage nodes
+    """
+    print("\n" + "=" * 65)
+    print("       STARTING COMPLETE MESH RESILIENCE TEST SUITE")
+    print(f"Coordinator: {client.port} | Kitchen: {kitchen_target} | Garage: {garage_target}")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    results = {}
+
+    # Sub-Test 1: All three nodes reset
+    print("\n>>> EXECUTING SUB-TEST 1 OF 3 <<<")
+    results["SubTest1_AllNodes"] = run_mesh_subtest_all_nodes(
+        client,
+        kitchen_target=kitchen_target,
+        garage_target=garage_target,
+        kitchen_port=kitchen_port,
+        garage_port=garage_port
+    )
+    time.sleep(1.0)
+
+    # Sub-Test 2: Garage only reset
+    print("\n>>> EXECUTING SUB-TEST 2 OF 3 <<<")
+    results["SubTest2_GarageOnly"] = run_mesh_subtest_garage_only(
+        client,
+        garage_target=garage_target,
+        kitchen_target=kitchen_target,
+        garage_port=garage_port
+    )
+    time.sleep(1.0)
+
+    # Sub-Test 3: Both end-nodes reset
+    print("\n>>> EXECUTING SUB-TEST 3 OF 3 <<<")
+    results["SubTest3_BothEndNodes"] = run_mesh_subtest_both_nodes(
+        client,
+        kitchen_target=kitchen_target,
+        garage_target=garage_target,
+        kitchen_port=kitchen_port,
+        garage_port=garage_port
+    )
+
+    # Final Master Summary
+    print("\n" + "=" * 65)
+    print("            MESH RESILIENCE TEST SUITE SUMMARY")
+    print("=" * 65)
+    subtests = [
+        ("SubTest1_AllNodes",     "Sub-Test 1: All Nodes Reset (Coordinator + Kitchen + Garage)"),
+        ("SubTest2_GarageOnly",   "Sub-Test 2: Garage Only Reset (Partial Topology Healing)"),
+        ("SubTest3_BothEndNodes", "Sub-Test 3: Both End-Nodes Reset (Kitchen + Garage)")
+    ]
+
+    all_passed = True
+    for key, desc in subtests:
+        passed = results.get(key, False)
+        status = "[PASS]" if passed else "[FAIL]"
+        if not passed:
+            all_passed = False
+        print(f"  {status:<10} {desc}")
+
+    print("=" * 65)
+    if all_passed:
+        print("  >>> ALL 3 MESH RESILIENCE TESTS PASSED SUCCESSFULLY! (3/3) <<<")
+    else:
+        print("  >>> ONE OR MORE MESH RESILIENCE TESTS FAILED <<<")
+    print("=" * 65 + "\n")
+
+    return all_passed
+
+
 def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", garage_target: str = "Garage", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
     """Executes all regression tests in sequence and displays a structured report."""
     print("\n" + "=" * 65)
@@ -1664,6 +2165,12 @@ def main():
     parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
+    parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
+    parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
+    parser.add_argument("--mesh-sub2", action="store_true", help="Run Mesh Sub-Test 2 (Reset Garage node only) and exit")
+    parser.add_argument("--mesh-sub3", action="store_true", help="Run Mesh Sub-Test 3 (Reset both Kitchen and Garage) and exit")
+    parser.add_argument("--kitchen-port", type=str, default=None, help="Optional serial port for Kitchen node hardware reset (e.g. COM5)")
+    parser.add_argument("--garage-port", type=str, default=None, help="Optional serial port for Garage node hardware reset (e.g. COM8)")
 
     args = parser.parse_args()
 
@@ -1678,6 +2185,22 @@ def main():
 
     try:
         # CLI direct test execution flags
+        if args.mesh:
+            passed = run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
+            sys.exit(0 if passed else 1)
+
+        if args.mesh_sub1:
+            passed = run_mesh_subtest_all_nodes(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
+            sys.exit(0 if passed else 1)
+
+        if args.mesh_sub2:
+            passed = run_mesh_subtest_garage_only(client, garage_target=args.garage, kitchen_target=args.target, garage_port=args.garage_port)
+            sys.exit(0 if passed else 1)
+
+        if args.mesh_sub3:
+            passed = run_mesh_subtest_both_nodes(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
+            sys.exit(0 if passed else 1)
+
         if args.all:
             passed = run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
             sys.exit(0 if passed else 1)
@@ -1769,6 +2292,7 @@ def main():
             print("  [R] Read Proximity Value        (ReadProximity)")
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
             print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
+            print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
             print("  [0] Interactive PuTTY Console Mode")
@@ -1776,7 +2300,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -1822,6 +2346,8 @@ def main():
                 run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
             elif choice in ("B", "BIDI"):
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
+            elif choice in ("W", "MESH"):
+                run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):
                 print("\n[>] Requesting Network Report...")
                 client.send_line("GiveNetworkReport")

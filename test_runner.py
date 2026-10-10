@@ -156,7 +156,7 @@ def choose_port() -> str:
 def run_setup_bridge_test(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
     """Sends `<target> SetupSerialBridge` and verifies response."""
     print("\n" + "=" * 65)
-    print("--- [TEST 1/5] SETUP SERIAL BRIDGE ---")
+    print("--- [TEST 2] SETUP SERIAL BRIDGE ---")
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
@@ -195,7 +195,7 @@ def run_blink_test(client: CoordinatorClient, target: str = "Kitchen", count: in
     3. Asserts that the observed count matches the requested count.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 2/5] ESP32-C6 ONBOARD LED BLINK TEST ---")
+    print("--- [TEST 3] ESP32-C6 ONBOARD LED BLINK TEST ---")
     print(f"Target Node:    {target} (ESP32-C6 Onboard LED)")
     print(f"Requested Blinks: {count}")
     print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -242,7 +242,7 @@ def run_blinkx_test(client: CoordinatorClient, target: str = "Kitchen", count: i
     3. Asserts that the observed count matches the requested count.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 3/5] ARDUINO DOTSTAR LED BLINKX TEST ---")
+    print("--- [TEST 4] ARDUINO DOTSTAR LED BLINKX TEST ---")
     print(f"Target Node:    {target} -> Arduino Test Fixture (Blue DotStar LED)")
     print(f"Requested Blinks: {count}")
     print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -287,7 +287,7 @@ def run_ping_test(client: CoordinatorClient, target: str = "Kitchen", timeout: f
     Host -> Coordinator -> Zigbee OTA -> ESP32-C6 -> Arduino -> ESP32-C6 -> Coordinator -> Host
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 4/5] TWO-WAY SERIAL PING TEST ---")
+    print("--- [TEST 5] TWO-WAY SERIAL PING TEST ---")
     print(f"Target Node: {target} (End-to-end Zigbee + Serial Bridge)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
@@ -327,7 +327,7 @@ def run_dac_test(client: CoordinatorClient, target: str = "Kitchen", dac_val: in
     Waits for `< <target>: GotDAC <dac_val>`.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 5/5] ARDUINO HARDWARE DAC OUTPUT TEST ---")
+    print("--- [TEST 6] ARDUINO HARDWARE DAC OUTPUT TEST ---")
     print(f"Target Node: {target}")
     voltage = (dac_val * 3.3) / 1023.0
     print(f"DAC Value:   {dac_val} / 1023 (~{voltage:.2f}V on Trinket M0 Pin A0)")
@@ -437,7 +437,7 @@ def run_dac_adc_loopback_test(client: CoordinatorClient, target: str = "Kitchen"
         test_points = [0, 256, 512, 768, 1023]
 
     print("\n" + "=" * 65)
-    print("--- [TEST 6/7] CLOSED-LOOP DAC -> ADC LOOPBACK TEST ---")
+    print("--- [TEST 8] CLOSED-LOOP DAC -> ADC LOOPBACK TEST ---")
     print(f"Target Node:  {target} (Trinket M0 Pin 1~ DAC -> ESP32-C6 Pin A1)")
     print(f"Test Points:  {test_points}")
     print(f"Timestamp:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -639,7 +639,7 @@ def run_schmitt_hysteresis_ramp_test(
       3. Lowering lower threshold causes falling event to trigger LATER during ramp-down.
     """
     print("\n" + "=" * 65)
-    print("--- SCHMITT TRIGGER THRESHOLD CONTROLLABILITY RAMP TEST ---")
+    print("--- [TEST 9] SCHMITT TRIGGER THRESHOLD CONTROLLABILITY RAMP TEST ---")
     print(f"Target Node:       {target} (Trinket M0 DAC Pin 1~ -> ESP32-C6 Pin A1)")
     print(f"Ramp Profile:      0 -> 1000 in {ramp_time:.1f}s, then 1000 -> 0 in {ramp_time:.1f}s")
     print(f"Pass 1 (Baseline): Lower = {base_lower}, Upper = {base_upper}")
@@ -732,7 +732,7 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     4. Operator confirms visual snap vs slew behavior.
     """
     print("\n" + "=" * 65)
-    print("--- SERVO / PWM HARDWARE TEST (PIN 2) ---")
+    print("--- [TEST S] SERVO / PWM HARDWARE TEST (PIN 2) ---")
     print(f"Target Node: {target} (ESP32-C6 Pin 2 -> 74HCT125 -> Servo)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
@@ -822,7 +822,7 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
         5. Set to zero output (0) with no ramp (slew = 0)
     """
     print("\n" + "=" * 65)
-    print("--- CYTRON 10C MOTOR DRIVER TEST (PINS 18 & 20) ---")
+    print("--- [TEST M] CYTRON 10C MOTOR DRIVER TEST (PINS 18 & 20) ---")
     print(f"Target Node: {target} (Pin 18: PWM Speed | Pin 20: Direction)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
@@ -943,7 +943,7 @@ def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     5. Verifies end-to-end event flow over Zigbee.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 9/9] APDS9930 PROXIMITY SENSOR TEST ---")
+    print("--- [TEST D] APDS9930 PROXIMITY SENSOR TEST ---")
     print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
@@ -1210,7 +1210,7 @@ def run_garage_gpio_test(
     6. Reads Garage Pin 16 (<garage> ReadGPIO 16) and verifies it reads 1 (HIGH).
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 10/10] GARAGE GPIO INPUT TEST (PIN 16) ---")
+    print("--- [TEST G] GARAGE GPIO INPUT TEST (PIN 16) ---")
     print(f"Garage Node:       {garage_target} (ESP32-C6 Pin {pin} as INPUT GPIO)")
     print(f"Arduino Host Node: {kitchen_target} (Trinket M0 PIN_D0 -> Garage Pin {pin})")
     print(f"Timestamp:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1309,7 +1309,7 @@ def run_bidirectional_gpio_test(
     5. Final Cleanup: Sets both pins back to INPUT.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 11/11] BIDIRECTIONAL GPIO WIRE TEST (KITCHEN <-> GARAGE) ---")
+    print("--- [TEST B] BIDIRECTIONAL GPIO WIRE TEST (KITCHEN <-> GARAGE) ---")
     print(f"Wire Connection:   {kitchen_target} Pin {kitchen_pin} <---> {garage_target} Pin {garage_pin}")
     print(f"Direction 1:       {kitchen_target} (OUT) -> {garage_target} (IN)")
     print(f"Safe Transition:   Both set to INPUT (contention prevention)")
@@ -1497,42 +1497,42 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
     results["Schmitt_Ramp"] = run_schmitt_hysteresis_ramp_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 8: Servo / PWM Snap and Slew Test
+    # Test [S]: Servo / PWM Snap and Slew Test
     results["Servo_PWM"] = run_servo_pwm_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 9: APDS9930 Proximity Sensor Test
+    # Test [M]: Cytron 10C Motor Driver Test (Pin 18 PWM, Pin 20 DIR)
+    results["Cytron_Motor"] = run_cytron_motor_test(client, target=target)
+    time.sleep(0.5)
+
+    # Test [D]: APDS9930 Proximity Sensor Test
     results["APDS9930_Prox"] = run_proximity_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 10: Garage Pin 16 GPIO Input Test
+    # Test [G]: Garage Pin 16 GPIO Input Test
     results["Garage_GPIO"] = run_garage_gpio_test(client, garage_target=garage_target, kitchen_target=target)
     time.sleep(0.5)
 
-    # Test 11: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
+    # Test [B]: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
     results["Bidi_GPIO"] = run_bidirectional_gpio_test(client, kitchen_target=target, garage_target=garage_target, kitchen_pin=21, garage_pin=17)
-    time.sleep(0.5)
-
-    # Test 12: Cytron 10C Motor Driver Test (Pin 18 PWM, Pin 20 DIR)
-    results["Cytron_Motor"] = run_cytron_motor_test(client, target=target)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
     print("             REGRESSION TEST RESULTS SUMMARY")
     print("=" * 65)
     labels = {
-        "SetupSerialBridge": "1. Setup Serial Bridge",
-        "ESP32_Blink":       f"2. ESP32-C6 Onboard LED Blink ({blink_count} flashes)",
-        "Arduino_Blinkx":    f"3. Arduino DotStar Blinkx     ({blinkx_count} flashes)",
-        "Serial_Ping":       "4. Two-Way Serial Ping        (GotPing)",
-        "Arduino_DAC":       f"5. Arduino Hardware DAC        (GotDAC {dac_val})",
-        "DAC_ADC_Loopback":  "6. DAC -> ADC Loopback        (Pin 1~ -> Pin A1)",
-        "Schmitt_Ramp":      "7. Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
-        "Servo_PWM":         "8. Servo / PWM Motion         (Snap & Slew 30)",
-        "APDS9930_Prox":     "9. APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
-        "Garage_GPIO":       "10. Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
-        "Bidi_GPIO":         "11. Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
-        "Cytron_Motor":      "12. Cytron 10C Motor Driver   (Pin 18 PWM, Pin 20 DIR: 2s FWD, 4s REV, 1s Pause, Snap 0)"
+        "SetupSerialBridge": "[2] Setup Serial Bridge",
+        "ESP32_Blink":       f"[3] ESP32-C6 Onboard LED Blink ({blink_count} flashes)",
+        "Arduino_Blinkx":    f"[4] Arduino DotStar Blinkx     ({blinkx_count} flashes)",
+        "Serial_Ping":       "[5] Two-Way Serial Ping        (GotPing)",
+        "Arduino_DAC":       f"[6] Arduino Hardware DAC        (GotDAC {dac_val})",
+        "DAC_ADC_Loopback":  "[8] Closed-Loop DAC -> ADC     (Pin 1~ -> Pin A1)",
+        "Schmitt_Ramp":      "[9] Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
+        "Servo_PWM":         "[S] Servo / PWM Motion         (Snap & Slew 30)",
+        "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)",
+        "APDS9930_Prox":     "[D] APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
+        "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
+        "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)"
     }
 
     all_passed = True

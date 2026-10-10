@@ -1038,12 +1038,7 @@ def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     client.add_rx_callback(on_prox_event)
 
     print("\n" + "-" * 65)
-    print("[!] ACTION REQUIRED: Prepare to bring your hand or an obstacle within 5-10cm of the APDS9930 sensor.")
-    try:
-        input("    Press [Enter] when ready to begin proximity detection test...")
-    except (EOFError, OSError):
-        pass
-    print("\n>>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
+    print(">>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
     print("Waiting up to 20 seconds for 'Car Detected' event...")
     got_detected = detected_event.wait(timeout=20.0)
 

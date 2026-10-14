@@ -1405,6 +1405,142 @@ def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     return all_passed
 
 
+def setup_ssd1306_display(client: CoordinatorClient, target: str = "Kitchen", addr: int = 60, timeout: float = 3.0) -> bool:
+    """Initializes SSD1306 OLED display on target node at specified I2C address (default: 60 / 0x3C)."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SETUP DISP OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "SETUP DISP FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupDisp {addr}"
+    print(f"\n[>] Initializing SSD1306 OLED on {target} at I2C address {addr} (0x{addr:02X}): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] SSD1306 OLED initialized successfully on {target} at address {addr} (0x{addr:02X}) ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupDisp did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def clear_display(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
+    """Clears SSD1306 OLED display and resets cursor to top of screen."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "CLEARDISP OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "CLEARDISP FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} ClearDisp"
+    print(f"\n[>] Clearing SSD1306 display on {target}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] ClearDisp succeeded on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] ClearDisp did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def print_display_line(client: CoordinatorClient, target: str = "Kitchen", size: int = 12, text: str = "Hello World", timeout: float = 3.0) -> bool:
+    """Prints a line of text in FreeMono font (9, 12, 18, 24 pt) on SSD1306 and advances cursor."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "PRINT OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "PRINT FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} print {size} {text}"
+    print(f"\n[>] Printing line on {target} display ({size}pt: \"{text}\"): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] Print line succeeded on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Print line did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 60, timeout: float = 3.0) -> bool:
+    """
+    Validates SSD1306 128x64 OLED Display:
+    1. Initializes display at specified address (default 60 / 0x3C).
+    2. Clears the display and resets cursor (ClearDisp).
+    3. Prints lines in all supported Adafruit GFX FreeMono font sizes (9, 12, 18, 24 pt).
+    4. Verifies line advancement and display responses.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST O] SSD1306 OLED DISPLAY & FREEMONO FONT TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 / SSD1306 @ 0x{addr:02X})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Step 1: Initialize Display
+    setup_ok = setup_ssd1306_display(client, target=target, addr=addr, timeout=timeout)
+    time.sleep(0.2)
+
+    # Step 2: Clear Display
+    clear_ok = clear_display(client, target=target, timeout=timeout)
+    time.sleep(0.2)
+
+    # Step 3: Print test lines across supported font sizes
+    font_tests = [
+        (9, "FreeMono 9pt"),
+        (12, "FreeMono 12pt"),
+        (18, "FreeMono 18"),
+        (24, "24pt"),
+    ]
+
+    all_passed = setup_ok and clear_ok
+
+    for size_pt, text in font_tests:
+        ok = print_display_line(client, target=target, size=size_pt, text=text, timeout=timeout)
+        if not ok:
+            all_passed = False
+        time.sleep(0.3)
+
+    print("-" * 65)
+    if all_passed:
+        print(f"[+] TEST PASSED: SSD1306 OLED verified on {target}!")
+    else:
+        print(f"[-] TEST FAILED: SSD1306 OLED verification failed on {target}.")
+    return all_passed
+
+
 def run_garage_gpio_test(
     client: CoordinatorClient,
     garage_target: str = "Garage",
@@ -2321,6 +2457,10 @@ def main():
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
     parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run PCF8574 Expand8 alternating bit test and exit")
     parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for PCF8574 Expand8 (default: 32 / 0x20)")
+    parser.add_argument("--cleardisp", action="store_true", help="Clear SSD1306 OLED display on target node and exit")
+    parser.add_argument("--print-disp", nargs="+", help="Print text on SSD1306 OLED display ([size] text...) and exit")
+    parser.add_argument("--oled", "--ssd1306", "--disp", action="store_true", help="Run SSD1306 OLED multi-size FreeMono font test and exit")
+    parser.add_argument("--oled-addr", type=int, default=60, help="I2C address for SSD1306 OLED (default: 60 / 0x3C)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -2372,6 +2512,25 @@ def main():
 
         if args.expand8:
             passed = run_expand8_test(client, target=args.target, addr=args.expand8_addr)
+            sys.exit(0 if passed else 1)
+
+        if args.cleardisp:
+            passed = clear_display(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
+        if args.print_disp:
+            tokens = args.print_disp
+            size = 12
+            if tokens and tokens[0].isdigit():
+                size = int(tokens[0])
+                text = " ".join(tokens[1:])
+            else:
+                text = " ".join(tokens)
+            passed = print_display_line(client, target=args.target, size=size, text=text)
+            sys.exit(0 if passed else 1)
+
+        if args.oled:
+            passed = run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             sys.exit(0 if passed else 1)
 
         if args.bridge:
@@ -2454,6 +2613,8 @@ def main():
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
             print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
             print("  [E] PCF8574 Expand8 Test        (Alternating 0/1 & 1/0 Bit Patterns)")
+            print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
+            print("  [C] Clear OLED Display          (ClearDisp)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -2462,7 +2623,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -2510,6 +2671,10 @@ def main():
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             elif choice in ("E", "EXPAND8", "PCF8574"):
                 run_expand8_test(client, target=args.target)
+            elif choice in ("O", "OLED", "SSD1306", "DISP"):
+                run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
+            elif choice in ("C", "CLEARDISP", "CLEAR"):
+                clear_display(client, target=args.target)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

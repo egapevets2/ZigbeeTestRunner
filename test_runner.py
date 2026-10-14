@@ -1096,12 +1096,12 @@ def clear_neopixels(client: CoordinatorClient, target: str = "Kitchen", num_pixe
 
 
 def setup_neopixel(client: CoordinatorClient, target: str = "Kitchen", pin: int = 19, num_pixels: int = 16) -> bool:
-    """Configures NeoPixel driver on target node at specified GPIO pin and zeroes all pixels."""
-    print(f"\n[>] Configuring NeoPixel on {target} Pin {pin} ({num_pixels} pixels)...")
-    client.send_line(f"{target} NeoGPIO {pin}")
+    """Configures NeoPixel driver on target node at specified GPIO pin and pixel count, and zeroes all pixels."""
+    print(f"\n[>] Configuring NeoPixel on {target} Pin {pin} ({num_pixels} pixels): \"{target} NeoGPIO {pin} {num_pixels}\"")
+    client.send_line(f"{target} NeoGPIO {pin} {num_pixels}")
     time.sleep(0.08)
     clear_neopixels(client, target=target, num_pixels=num_pixels)
-    print(f"[+] NeoPixel initialized on {target} Pin {pin} (all {num_pixels} LEDs cleared to black).")
+    print(f"[+] NeoPixel initialized on {target} Pin {pin} ({num_pixels} pixels cleared to black).")
     return True
 
 
@@ -1146,15 +1146,15 @@ def run_neopixel_test(
     max_brightness: int = 128
 ) -> bool:
     """
-    Validates NeoPixel.c peripheral on target node (default: Kitchen Pin 19, 16 pixels):
-    For each LED from 1 to 16:
+    Validates NeoPixel.c peripheral on target node (default: Kitchen Pin 19, configurable pixels):
+    For each LED from 1 to num_pixels:
       1. Fades dark -> 50% Red -> dark in 1 second.
       2. Fades dark -> 50% Green -> dark in 1 second.
       3. Fades dark -> 50% Blue -> dark in 1 second.
     Continues cycling strand until user hits ESC.
     """
     print("\n" + "=" * 65)
-    print("--- [NEO] 16-NEOPIXEL STRAND RGB CHASE & FADE TEST ---")
+    print(f"--- [NEO] {num_pixels}-NEOPIXEL STRAND RGB CHASE & FADE TEST ---")
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Hardware:    Pin {pin} -> 74HCT125 Level Shifter -> {num_pixels}-NeoPixel Strand")
     print(f"Brightness:  Dark (0) -> 50% ({max_brightness}) -> Dark (0)")
@@ -2972,6 +2972,9 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Garage ModeGPIOout 17")
     print("      Garage SetGPIOval 17 1")
     print("      Garage ReadGPIO 17")
+    print("      Kitchen NeoGPIO 19 7")
+    print("      Kitchen NeoRED 0 128")
+    print("      Kitchen NeoUpdate")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")
@@ -3029,9 +3032,9 @@ def main():
     parser.add_argument("--compass-addr", type=int, default=13, help="I2C address for QMC5883L compass (default: 13 / 0x0D)")
     parser.add_argument("--rgb", "--rgb-fade", action="store_true", help="Run Garage three-color RGB LED PWM fade cycle test (Pins 18, 20, 19) and exit")
     parser.add_argument("--rgb-duration", type=float, default=1.0, help="Duration in seconds for each color 0-100-0%% fade cycle (default: 1.0s)")
-    parser.add_argument("--neopixel", "--neo", "--strand", action="store_true", help="Run 16-NeoPixel strand chase and fade test (Kitchen Pin 19) and exit")
+    parser.add_argument("--neopixel", "--neo", "--strand", action="store_true", help="Run NeoPixel strand chase and fade test (configurable pin and count) and exit")
     parser.add_argument("--neopixel-pin", type=int, default=19, help="GPIO pin for NeoPixel data line (default: 19)")
-    parser.add_argument("--neopixel-count", type=int, default=16, help="Number of NeoPixels in strand (default: 16)")
+    parser.add_argument("--neopixel-count", type=int, default=16, help="Number of NeoPixels in strand (default: 16, e.g. 7)")
     parser.add_argument("--neopixel-duration", type=float, default=1.0, help="Duration in seconds for each color fade (default: 1.0s)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
@@ -3206,7 +3209,7 @@ def main():
             print("  [K] QMC5883L Compass Test       (Rotate > 45 deg Verification)")
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
-            print("  [V] NeoPixel 16-Strand Test     (Kitchen Pin 19: R->G->B Fade 1-16, ESC to stop)")
+            print("  [V] NeoPixel Strand Test        (Kitchen: Configurable Pin & Pixels, R->G->B Fade, ESC to stop)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -3274,7 +3277,11 @@ def main():
             elif choice in ("L", "RGB", "FADE", "RGBLED", "LEDFADE"):
                 run_garage_rgb_fade_test(client, target=args.garage, fade_duration=args.rgb_duration)
             elif choice in ("V", "NEO", "NEOPIXEL", "PIXEL", "STRAND"):
-                run_neopixel_test(client, target=args.target, pin=args.neopixel_pin, num_pixels=args.neopixel_count, fade_duration=args.neopixel_duration)
+                pixels_input = input(f"Enter number of NeoPixels [{args.neopixel_count}]: ").strip()
+                num_pixels = int(pixels_input) if (pixels_input.isdigit() and int(pixels_input) > 0) else args.neopixel_count
+                pin_input = input(f"Enter NeoPixel GPIO pin [{args.neopixel_pin}]: ").strip()
+                pin = int(pin_input) if (pin_input.isdigit() and int(pin_input) >= 0) else args.neopixel_pin
+                run_neopixel_test(client, target=args.target, pin=pin, num_pixels=num_pixels, fade_duration=args.neopixel_duration)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

@@ -1918,7 +1918,7 @@ def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     heading1 = (math.degrees(math.atan2(y1, x1)) + 360.0) % 360.0
 
     print(f"    Baseline Fields:      X = {x1:+.1f}, Y = {y1:+.1f}, Z = {z1:+.1f} LSB")
-    print(f"    Estimated 2D Heading: {heading1:.1f}°")
+    print(f"    Estimated 2D Heading: {heading1:.1f} deg")
 
     # Step 3: Prompt user rotation
     print("\n" + "*" * 65)
@@ -1949,7 +1949,7 @@ def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     heading2 = (math.degrees(math.atan2(y2, x2)) + 360.0) % 360.0
 
     print(f"    Rotated Fields:       X = {x2:+.1f}, Y = {y2:+.1f}, Z = {z2:+.1f} LSB")
-    print(f"    New 2D Heading:       {heading2:.1f}°")
+    print(f"    New 2D Heading:       {heading2:.1f} deg")
 
     # Step 5: Verification
     dx = x2 - x1
@@ -1963,15 +1963,15 @@ def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     print("\n--- Shift Analysis ---")
     print(f"    Delta Vector:         dX = {dx:+.1f}, dY = {dy:+.1f}, dZ = {dz:+.1f}")
     print(f"    Total Vector Shift:   {dist:.1f} LSB")
-    print(f"    Heading Angle Shift:  {angle_shift:.1f}°")
+    print(f"    Heading Angle Shift:  {angle_shift:.1f} deg")
 
     passed = (angle_shift >= 15.0 or dist >= 80.0)
 
     print("-" * 65)
     if passed:
-        print(f"[+] TEST PASSED: Magnetic fields moved as expected ({angle_shift:.1f}° shift, {dist:.1f} LSB displacement)!")
+        print(f"[+] TEST PASSED: Magnetic fields moved as expected ({angle_shift:.1f} deg shift, {dist:.1f} LSB displacement)!")
     else:
-        print(f"[-] TEST FAILED: Magnetic field movement insufficient (< 15° shift and < 80 LSB displacement).")
+        print(f"[-] TEST FAILED: Magnetic field movement insufficient (< 15 deg shift and < 80 LSB displacement).")
     return passed
 
 
@@ -2980,7 +2980,7 @@ def main():
             run_compass_stream(client, target=args.target, addr=args.compass_addr)
             sys.exit(0)
 
-        if args.rgb or args.rgb_fade:
+        if args.rgb:
             passed = run_garage_rgb_fade_test(client, target=args.garage, fade_duration=args.rgb_duration)
             sys.exit(0 if passed else 1)
 
@@ -3066,7 +3066,7 @@ def main():
             print("  [E] PCF8574 Expand8 Test        (Alternating 0/1 & 1/0 Bit Patterns)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [C] Clear OLED Display          (ClearDisp)")
-            print("  [K] QMC5883L Compass Test       (Rotate > 45° Verification)")
+            print("  [K] QMC5883L Compass Test       (Rotate > 45 deg Verification)")
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")

@@ -1586,6 +1586,8 @@ def get_compass_reading(client: CoordinatorClient, target: str = "Kitchen", time
         if m:
             reading = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
             got_event.set()
+        elif "COMPASS NOT READY" in msg:
+            got_event.set()
 
     client.add_rx_callback(on_rx)
     cmd = f"{target} GetCompass"
@@ -1594,6 +1596,88 @@ def get_compass_reading(client: CoordinatorClient, target: str = "Kitchen", time
     client.remove_rx_callback(on_rx)
 
     return reading
+
+
+def run_compass_stream(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, interval: float = 0.3) -> None:
+    """
+    Streams QMC5883L 3-axis magnetic field vector in 'x,y,z' format once every 300ms
+    until the user presses the ESC key.
+    """
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
+
+    def check_esc() -> bool:
+        if msvcrt is not None:
+            while msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch == b'\x1b':
+                    return True
+                # Consume secondary scan code byte for special keys (arrows, F-keys, etc.)
+                if ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
+                    msvcrt.getch()
+            return False
+        else:
+            import select
+            if select.select([sys.stdin], [], [], 0)[0]:
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':
+                    return True
+            return False
+
+    # Check if compass is ready; if uninitialized, configure it once
+    test_reading = get_compass_reading(client, target=target, timeout=0.3)
+    if test_reading is None:
+        print(f"[*] Initializing QMC5883L Compass on {target} at address {addr}...")
+        setup_compass(client, target=target, addr=addr, timeout=2.0)
+        time.sleep(0.1)
+
+    print(f"\n[+] Streaming {target} QMC5883L Compass readings every {int(interval * 1000)}ms.")
+    print("    Format: x,y,z (Press [ESC] to stop)\n")
+
+    # Flush any stale keypresses
+    if msvcrt is not None:
+        while msvcrt.kbhit():
+            msvcrt.getch()
+
+    try:
+        while True:
+            t_start = time.time()
+            if check_esc():
+                break
+
+            reading = get_compass_reading(client, target=target, timeout=0.25)
+            if check_esc():
+                break
+
+            if reading is not None:
+                print(f"{reading[0]},{reading[1]},{reading[2]}")
+
+            elapsed = time.time() - t_start
+            sleep_remain = max(0.0, interval - elapsed)
+            deadline = time.time() + sleep_remain
+
+            esc_hit = False
+            while time.time() < deadline:
+                if check_esc():
+                    esc_hit = True
+                    break
+                time.sleep(0.01)
+
+            if esc_hit:
+                break
+
+    except KeyboardInterrupt:
+        pass
+
+    if msvcrt is not None:
+        while msvcrt.kbhit():
+            msvcrt.getch()
+    print("\n[*] Stopped compass streaming.")
+
+
+stream_compass_readings = run_compass_stream
 
 
 def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, timeout: float = 3.0) -> bool:
@@ -2617,7 +2701,7 @@ def main():
     parser.add_argument("--oled", "--ssd1306", "--disp", action="store_true", help="Run SSD1306 OLED multi-size FreeMono font test and exit")
     parser.add_argument("--oled-addr", type=int, default=60, help="I2C address for SSD1306 OLED (default: 60 / 0x3C)")
     parser.add_argument("--compass", "--qmc5883l", action="store_true", help="Run QMC5883L 3-axis compass rotation test and exit")
-    parser.add_argument("--get-compass", action="store_true", help="Read instantaneous QMC5883L compass magnetic field vector and exit")
+    parser.add_argument("--get-compass", action="store_true", help="Stream QMC5883L compass readings (x,y,z every 300ms, ESC to stop) and exit")
     parser.add_argument("--compass-addr", type=int, default=13, help="I2C address for QMC5883L compass (default: 13 / 0x0D)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
@@ -2696,13 +2780,8 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.get_compass:
-            reading = get_compass_reading(client, target=args.target)
-            if reading is not None:
-                print(f"[+] Instantaneous Magnetic Field: X={reading[0]}, Y={reading[1]}, Z={reading[2]} LSB")
-                sys.exit(0)
-            else:
-                print("[-] Failed to read compass.")
-                sys.exit(1)
+            run_compass_stream(client, target=args.target, addr=args.compass_addr)
+            sys.exit(0)
 
         if args.bridge:
             passed = run_setup_bridge_test(client, target=args.target)
@@ -2851,11 +2930,7 @@ def main():
             elif choice in ("K", "COMPASS", "QMC5883L"):
                 run_compass_test(client, target=args.target, addr=args.compass_addr)
             elif choice in ("Q", "GETCOMPASS", "READCOMPASS"):
-                reading = get_compass_reading(client, target=args.target)
-                if reading is not None:
-                    print(f"\n[+] Instantaneous Magnetic Field: X={reading[0]}, Y={reading[1]}, Z={reading[2]} LSB")
-                else:
-                    print("\n[-] Failed to read compass.")
+                run_compass_stream(client, target=args.target, addr=args.compass_addr)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

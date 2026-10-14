@@ -181,6 +181,52 @@ def choose_port() -> str:
             return sel
 
 
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+
+def check_esc_key() -> bool:
+    """Checks whether the ESC key (0x1B) has been pressed in the console."""
+    if msvcrt is not None:
+        while msvcrt.kbhit():
+            ch = msvcrt.getch()
+            if ch == b'\x1b':
+                return True
+            # Consume secondary scan code byte for special keys (arrows, F-keys, etc.)
+            if ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
+                msvcrt.getch()
+        return False
+    else:
+        import select
+        if select.select([sys.stdin], [], [], 0)[0]:
+            ch = sys.stdin.read(1)
+            if ch == '\x1b':
+                return True
+        return False
+
+
+def flush_console_keys() -> None:
+    """Clears any pending keystrokes from the console input buffer."""
+    if msvcrt is not None:
+        while msvcrt.kbhit():
+            msvcrt.getch()
+
+
+def sleep_or_esc(duration: float, step: float = 0.01) -> bool:
+    """
+    Sleeps for duration seconds while polling for the ESC key every step seconds.
+    Returns True immediately if ESC was pressed, False if sleep completed normally.
+    """
+    deadline = time.time() + duration
+    while time.time() < deadline:
+        if check_esc_key():
+            return True
+        time.sleep(step)
+    return False
+
+
 def run_setup_bridge_test(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
     """Sends `<target> SetupSerialBridge` and verifies response."""
     print("\n" + "=" * 65)
@@ -859,6 +905,183 @@ def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     else:
         print("[-] TEST FAILED: Servo motion was not confirmed by operator.")
     return passed
+
+
+def setup_rgb_led_pwms(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    pin_r: int = 18,
+    pin_g: int = 20,
+    pin_b: int = 19,
+    freq: int = 1000
+) -> bool:
+    """
+    Initializes three GPIO pins as hardware PWM channels on the target node.
+    Maps:
+      PWM Channel 1 -> pin_r (default 18)
+      PWM Channel 2 -> pin_g (default 20)
+      PWM Channel 3 -> pin_b (default 19)
+    """
+    print(f"\n[>] Configuring RGB LED PWMs on {target}:")
+    print(f"    Channel 1 -> GPIO {pin_r}")
+    print(f"    Channel 2 -> GPIO {pin_g}")
+    print(f"    Channel 3 -> GPIO {pin_b}")
+
+    cmds = [
+        # Pin assignment and frequency configuration
+        f"{target} pwmPin1 {pin_r}",
+        f"{target} pwmFreq1 {freq}",
+        f"{target} SetupPWM1",
+        f"{target} pwmPin2 {pin_g}",
+        f"{target} pwmFreq2 {freq}",
+        f"{target} SetupPWM2",
+        f"{target} pwmPin3 {pin_b}",
+        f"{target} pwmFreq3 {freq}",
+        f"{target} SetupPWM3",
+        # Turn all channels OFF initially (Common Anode @ 3.3V -> duty 1023)
+        f"{target} pwmSlew1 0",
+        f"{target} pwm1 1023",
+        f"{target} pwmSlew2 0",
+        f"{target} pwm2 1023",
+        f"{target} pwmSlew3 0",
+        f"{target} pwm3 1023",
+    ]
+
+    for c in cmds:
+        client.send_line(c)
+        time.sleep(0.06)
+
+    print(f"[+] RGB LED PWM channels 1, 2, 3 configured on {target} (all OFF).")
+    return True
+
+
+def run_garage_rgb_fade_test(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    pin_r: int = 18,
+    pin_g: int = 20,
+    pin_b: int = 19,
+    fade_duration: float = 1.0,
+    common_anode: bool = True
+) -> bool:
+    """
+    Tests three-color RGB LED on Garage node (Pins 18, 20, 19 with 1.2k resistors, Common to 3.3V):
+    1. Sets up GPIOs 18, 20, 19 as hardware PWM channels.
+    2. Fades Pin 18 from 0% -> 100% -> 0% over `fade_duration` (default: 1.0s).
+    3. Fades Pin 20 from 0% -> 100% -> 0% over `fade_duration`.
+    4. Fades Pin 19 from 0% -> 100% -> 0% over `fade_duration`.
+    5. Fades all three simultaneously from 0% -> 100% -> 0% over `fade_duration`.
+    6. Keeps cycling that pattern until the user hits the ESC key.
+    """
+    print("\n" + "=" * 65)
+    print("--- [RGB] GARAGE THREE-COLOR LED PWM FADE CYCLE TEST ---")
+    print(f"Target Node: {target} (ESP32-C6)")
+    print(f"Pins:        Pin {pin_r} (Ch 1), Pin {pin_g} (Ch 2), Pin {pin_b} (Ch 3)")
+    print("Hardware:    1.2k Ohm series resistors on each pin, Common Anode to 3.3V")
+    print(f"Pattern:     Pin {pin_r} ({fade_duration:.1f}s) -> Pin {pin_g} ({fade_duration:.1f}s) -> Pin {pin_b} ({fade_duration:.1f}s) -> All Three ({fade_duration:.1f}s)")
+    print("Action:      Cycling pattern continuously. Press [ESC] to stop.")
+    print("=" * 65)
+
+    # Step 1: Configure hardware PWM channels
+    setup_rgb_led_pwms(client, target=target, pin_r=pin_r, pin_g=pin_g, pin_b=pin_b)
+    time.sleep(0.1)
+
+    # Calculate ramp timings and slew rate
+    # fade_duration is total round-trip time (0% -> 100% -> 0%)
+    half_time = max(0.1, fade_duration / 2.0)
+    # Range is 1023 counts
+    slew_rate = max(1, int(1023.0 / half_time))
+
+    # Set hardware slew rate on all 3 channels
+    client.send_line(f"{target} pwmSlew1 {slew_rate}")
+    time.sleep(0.04)
+    client.send_line(f"{target} pwmSlew2 {slew_rate}")
+    time.sleep(0.04)
+    client.send_line(f"{target} pwmSlew3 {slew_rate}")
+    time.sleep(0.1)
+
+    # For Common Anode (Common connected to 3.3V):
+    #   0% brightness   -> Pin at 3.3V -> Duty 1023 (OFF)
+    #   100% brightness -> Pin at 0.0V -> Duty 0    (Full ON)
+    duty_off = 1023 if common_anode else 0
+    duty_on  = 0 if common_anode else 1023
+
+    flush_console_keys()
+    cycle_count = 0
+    stopped_by_user = False
+
+    try:
+        while True:
+            cycle_count += 1
+            print(f"\n[>] --- Starting Fade Cycle #{cycle_count} ---")
+
+            # Phase 1: Pin 18 (Channel 1)
+            print(f"  [1/4] Fading Pin {pin_r}: 0% -> 100% -> 0% ({fade_duration:.1f}s)...")
+            client.send_line(f"{target} pwm1 {duty_on}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+            client.send_line(f"{target} pwm1 {duty_off}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+
+            # Phase 2: Pin 20 (Channel 2)
+            print(f"  [2/4] Fading Pin {pin_g}: 0% -> 100% -> 0% ({fade_duration:.1f}s)...")
+            client.send_line(f"{target} pwm2 {duty_on}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+            client.send_line(f"{target} pwm2 {duty_off}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+
+            # Phase 3: Pin 19 (Channel 3)
+            print(f"  [3/4] Fading Pin {pin_b}: 0% -> 100% -> 0% ({fade_duration:.1f}s)...")
+            client.send_line(f"{target} pwm3 {duty_on}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+            client.send_line(f"{target} pwm3 {duty_off}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+
+            # Phase 4: All Three Simultaneously
+            print(f"  [4/4] Fading All 3 (Pins {pin_r}, {pin_g}, {pin_b}): 0% -> 100% -> 0% ({fade_duration:.1f}s)...")
+            client.send_line(f"{target} pwm1 {duty_on}")
+            client.send_line(f"{target} pwm2 {duty_on}")
+            client.send_line(f"{target} pwm3 {duty_on}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+            client.send_line(f"{target} pwm1 {duty_off}")
+            client.send_line(f"{target} pwm2 {duty_off}")
+            client.send_line(f"{target} pwm3 {duty_off}")
+            if sleep_or_esc(half_time):
+                stopped_by_user = True
+                break
+
+    except KeyboardInterrupt:
+        stopped_by_user = True
+
+    finally:
+        # Snap all three channels back to OFF
+        print(f"\n[*] Turning off all RGB LED channels on {target}...")
+        client.send_line(f"{target} pwmSlew1 0")
+        client.send_line(f"{target} pwm1 {duty_off}")
+        time.sleep(0.04)
+        client.send_line(f"{target} pwmSlew2 0")
+        client.send_line(f"{target} pwm2 {duty_off}")
+        time.sleep(0.04)
+        client.send_line(f"{target} pwmSlew3 0")
+        client.send_line(f"{target} pwm3 {duty_off}")
+        flush_console_keys()
+
+    print("-" * 65)
+    print(f"[+] Completed {cycle_count} RGB LED fade cycle(s). Test stopped cleanly.")
+    return True
 
 
 def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
@@ -1603,29 +1826,6 @@ def run_compass_stream(client: CoordinatorClient, target: str = "Kitchen", addr:
     Streams QMC5883L 3-axis magnetic field vector in 'x,y,z' format once every 300ms
     until the user presses the ESC key.
     """
-    try:
-        import msvcrt
-    except ImportError:
-        msvcrt = None
-
-    def check_esc() -> bool:
-        if msvcrt is not None:
-            while msvcrt.kbhit():
-                ch = msvcrt.getch()
-                if ch == b'\x1b':
-                    return True
-                # Consume secondary scan code byte for special keys (arrows, F-keys, etc.)
-                if ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
-                    msvcrt.getch()
-            return False
-        else:
-            import select
-            if select.select([sys.stdin], [], [], 0)[0]:
-                ch = sys.stdin.read(1)
-                if ch == '\x1b':
-                    return True
-            return False
-
     # Check if compass is ready; if uninitialized, configure it once
     test_reading = get_compass_reading(client, target=target, timeout=0.3)
     if test_reading is None:
@@ -1636,19 +1836,16 @@ def run_compass_stream(client: CoordinatorClient, target: str = "Kitchen", addr:
     print(f"\n[+] Streaming {target} QMC5883L Compass readings every {int(interval * 1000)}ms.")
     print("    Format: x,y,z (Press [ESC] to stop)\n")
 
-    # Flush any stale keypresses
-    if msvcrt is not None:
-        while msvcrt.kbhit():
-            msvcrt.getch()
+    flush_console_keys()
 
     try:
         while True:
             t_start = time.time()
-            if check_esc():
+            if check_esc_key():
                 break
 
             reading = get_compass_reading(client, target=target, timeout=0.25)
-            if check_esc():
+            if check_esc_key():
                 break
 
             if reading is not None:
@@ -1660,7 +1857,7 @@ def run_compass_stream(client: CoordinatorClient, target: str = "Kitchen", addr:
 
             esc_hit = False
             while time.time() < deadline:
-                if check_esc():
+                if check_esc_key():
                     esc_hit = True
                     break
                 time.sleep(0.01)
@@ -1671,9 +1868,7 @@ def run_compass_stream(client: CoordinatorClient, target: str = "Kitchen", addr:
     except KeyboardInterrupt:
         pass
 
-    if msvcrt is not None:
-        while msvcrt.kbhit():
-            msvcrt.getch()
+    flush_console_keys()
     print("\n[*] Stopped compass streaming.")
 
 
@@ -2703,6 +2898,8 @@ def main():
     parser.add_argument("--compass", "--qmc5883l", action="store_true", help="Run QMC5883L 3-axis compass rotation test and exit")
     parser.add_argument("--get-compass", action="store_true", help="Stream QMC5883L compass readings (x,y,z every 300ms, ESC to stop) and exit")
     parser.add_argument("--compass-addr", type=int, default=13, help="I2C address for QMC5883L compass (default: 13 / 0x0D)")
+    parser.add_argument("--rgb", "--rgb-fade", action="store_true", help="Run Garage three-color RGB LED PWM fade cycle test (Pins 18, 20, 19) and exit")
+    parser.add_argument("--rgb-duration", type=float, default=1.0, help="Duration in seconds for each color 0-100-0%% fade cycle (default: 1.0s)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -2782,6 +2979,10 @@ def main():
         if args.get_compass:
             run_compass_stream(client, target=args.target, addr=args.compass_addr)
             sys.exit(0)
+
+        if args.rgb or args.rgb_fade:
+            passed = run_garage_rgb_fade_test(client, target=args.garage, fade_duration=args.rgb_duration)
+            sys.exit(0 if passed else 1)
 
         if args.bridge:
             passed = run_setup_bridge_test(client, target=args.target)
@@ -2867,6 +3068,7 @@ def main():
             print("  [C] Clear OLED Display          (ClearDisp)")
             print("  [K] QMC5883L Compass Test       (Rotate > 45° Verification)")
             print("  [Q] Read Compass Values         (GetCompass)")
+            print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -2875,7 +3077,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, L, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -2931,6 +3133,8 @@ def main():
                 run_compass_test(client, target=args.target, addr=args.compass_addr)
             elif choice in ("Q", "GETCOMPASS", "READCOMPASS"):
                 run_compass_stream(client, target=args.target, addr=args.compass_addr)
+            elif choice in ("L", "RGB", "FADE", "RGBLED", "LEDFADE"):
+                run_garage_rgb_fade_test(client, target=args.garage, fade_duration=args.rgb_duration)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

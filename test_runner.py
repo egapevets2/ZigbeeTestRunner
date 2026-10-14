@@ -1541,6 +1541,161 @@ def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     return all_passed
 
 
+def setup_compass(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, timeout: float = 3.0) -> bool:
+    """Initializes QMC5883L 3-axis digital compass on target node (default: 13 / 0x0D)."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SETUP COMPASS OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "SETUP COMPASS FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupCompass {addr}"
+    print(f"\n[>] Initializing QMC5883L Compass on {target} at I2C address {addr} (0x{addr:02X}): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] QMC5883L Compass initialized successfully on {target} at address {addr} (0x{addr:02X}) ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupCompass did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def get_compass_reading(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> tuple[int, int, int] | None:
+    """
+    Reads 3-axis magnetic field vector (X, Y, Z) from target node.
+    Sends `<target> GetCompass` and parses `COMPASS <x> <y> <z>`.
+    """
+    got_event = threading.Event()
+    reading = None
+    pattern = re.compile(r"COMPASS\s+([-\d]+)\s+([-\d]+)\s+([-\d]+)", re.IGNORECASE)
+
+    def on_rx(msg: str):
+        nonlocal reading
+        m = pattern.search(msg)
+        if m:
+            reading = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            got_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} GetCompass"
+    client.send_line(cmd)
+    got_event.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    return reading
+
+
+def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, timeout: float = 3.0) -> bool:
+    """
+    Validates QMC5883L 3-Axis Digital Compass:
+    1. Initializes sensor at address `addr` (SetupCompass <addr>).
+    2. Takes baseline magnetic field measurements (X1, Y1, Z1).
+    3. Prompts the user to rotate the sensor by > 45 degrees and press Enter.
+    4. Takes rotated magnetic field measurements (X2, Y2, Z2).
+    5. Calculates vector distance and angular shift to verify the fields moved.
+    """
+    import math
+
+    print("\n" + "=" * 65)
+    print("--- [TEST C] QMC5883L 3-AXIS DIGITAL COMPASS ROTATION TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 / QMC5883L @ 0x{addr:02X})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Step 1: Initialize
+    if not setup_compass(client, target=target, addr=addr, timeout=timeout):
+        print(f"[-] TEST FAILED: Unable to initialize QMC5883L on {target}.")
+        return False
+
+    time.sleep(0.3)
+
+    # Step 2: Read baseline
+    print("\n[*] Taking baseline magnetic field measurement...")
+    samples = []
+    for _ in range(3):
+        r = get_compass_reading(client, target=target, timeout=timeout)
+        if r is not None:
+            samples.append(r)
+        time.sleep(0.1)
+
+    if not samples:
+        print(f"[-] TEST FAILED: No response received to 'GetCompass' from {target}.")
+        return False
+
+    x1 = sum(s[0] for s in samples) / len(samples)
+    y1 = sum(s[1] for s in samples) / len(samples)
+    z1 = sum(s[2] for s in samples) / len(samples)
+    heading1 = (math.degrees(math.atan2(y1, x1)) + 360.0) % 360.0
+
+    print(f"    Baseline Fields:      X = {x1:+.1f}, Y = {y1:+.1f}, Z = {z1:+.1f} LSB")
+    print(f"    Estimated 2D Heading: {heading1:.1f}°")
+
+    # Step 3: Prompt user rotation
+    print("\n" + "*" * 65)
+    print(">>> ACTION REQUIRED: Turn / rotate the compass sensor by > 45 degrees. <<<")
+    print("*" * 65)
+    try:
+        input("Press [ENTER] after rotating the sensor to continue measurement...")
+    except EOFError:
+        pass
+
+    # Step 4: Read rotated field
+    print("\n[*] Taking rotated magnetic field measurement...")
+    time.sleep(0.2)
+    samples2 = []
+    for _ in range(3):
+        r = get_compass_reading(client, target=target, timeout=timeout)
+        if r is not None:
+            samples2.append(r)
+        time.sleep(0.1)
+
+    if not samples2:
+        print(f"[-] TEST FAILED: No response to 'GetCompass' after rotation from {target}.")
+        return False
+
+    x2 = sum(s[0] for s in samples2) / len(samples2)
+    y2 = sum(s[1] for s in samples2) / len(samples2)
+    z2 = sum(s[2] for s in samples2) / len(samples2)
+    heading2 = (math.degrees(math.atan2(y2, x2)) + 360.0) % 360.0
+
+    print(f"    Rotated Fields:       X = {x2:+.1f}, Y = {y2:+.1f}, Z = {z2:+.1f} LSB")
+    print(f"    New 2D Heading:       {heading2:.1f}°")
+
+    # Step 5: Verification
+    dx = x2 - x1
+    dy = y2 - y1
+    dz = z2 - z1
+    dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    angle_shift = abs(heading2 - heading1)
+    if angle_shift > 180.0:
+        angle_shift = 360.0 - angle_shift
+
+    print("\n--- Shift Analysis ---")
+    print(f"    Delta Vector:         dX = {dx:+.1f}, dY = {dy:+.1f}, dZ = {dz:+.1f}")
+    print(f"    Total Vector Shift:   {dist:.1f} LSB")
+    print(f"    Heading Angle Shift:  {angle_shift:.1f}°")
+
+    passed = (angle_shift >= 15.0 or dist >= 80.0)
+
+    print("-" * 65)
+    if passed:
+        print(f"[+] TEST PASSED: Magnetic fields moved as expected ({angle_shift:.1f}° shift, {dist:.1f} LSB displacement)!")
+    else:
+        print(f"[-] TEST FAILED: Magnetic field movement insufficient (< 15° shift and < 80 LSB displacement).")
+    return passed
+
+
 def run_garage_gpio_test(
     client: CoordinatorClient,
     garage_target: str = "Garage",
@@ -2461,6 +2616,9 @@ def main():
     parser.add_argument("--print-disp", nargs="+", help="Print text on SSD1306 OLED display ([size] text...) and exit")
     parser.add_argument("--oled", "--ssd1306", "--disp", action="store_true", help="Run SSD1306 OLED multi-size FreeMono font test and exit")
     parser.add_argument("--oled-addr", type=int, default=60, help="I2C address for SSD1306 OLED (default: 60 / 0x3C)")
+    parser.add_argument("--compass", "--qmc5883l", action="store_true", help="Run QMC5883L 3-axis compass rotation test and exit")
+    parser.add_argument("--get-compass", action="store_true", help="Read instantaneous QMC5883L compass magnetic field vector and exit")
+    parser.add_argument("--compass-addr", type=int, default=13, help="I2C address for QMC5883L compass (default: 13 / 0x0D)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -2532,6 +2690,19 @@ def main():
         if args.oled:
             passed = run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             sys.exit(0 if passed else 1)
+
+        if args.compass:
+            passed = run_compass_test(client, target=args.target, addr=args.compass_addr)
+            sys.exit(0 if passed else 1)
+
+        if args.get_compass:
+            reading = get_compass_reading(client, target=args.target)
+            if reading is not None:
+                print(f"[+] Instantaneous Magnetic Field: X={reading[0]}, Y={reading[1]}, Z={reading[2]} LSB")
+                sys.exit(0)
+            else:
+                print("[-] Failed to read compass.")
+                sys.exit(1)
 
         if args.bridge:
             passed = run_setup_bridge_test(client, target=args.target)
@@ -2615,6 +2786,8 @@ def main():
             print("  [E] PCF8574 Expand8 Test        (Alternating 0/1 & 1/0 Bit Patterns)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [C] Clear OLED Display          (ClearDisp)")
+            print("  [K] QMC5883L Compass Test       (Rotate > 45° Verification)")
+            print("  [Q] Read Compass Values         (GetCompass)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -2623,7 +2796,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -2675,6 +2848,14 @@ def main():
                 run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
                 clear_display(client, target=args.target)
+            elif choice in ("K", "COMPASS", "QMC5883L"):
+                run_compass_test(client, target=args.target, addr=args.compass_addr)
+            elif choice in ("Q", "GETCOMPASS", "READCOMPASS"):
+                reading = get_compass_reading(client, target=args.target)
+                if reading is not None:
+                    print(f"\n[+] Instantaneous Magnetic Field: X={reading[0]}, Y={reading[1]}, Z={reading[2]} LSB")
+                else:
+                    print("\n[-] Failed to read compass.")
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):
@@ -2691,7 +2872,7 @@ def main():
                 new_target = input(f"Enter new target node name [{args.target}]: ").strip()
                 if new_target:
                     args.target = new_target
-            elif choice in ("X", "EXIT", "QUIT", "Q"):
+            elif choice in ("X", "EXIT", "QUIT"):
                 break
             else:
                 print("[!] Invalid option, please retry.")

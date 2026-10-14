@@ -1255,6 +1255,156 @@ def set_gpio_val(client: CoordinatorClient, target: str, pin: int, val: int, tim
     return True
 
 
+def setup_expand8(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, timeout: float = 3.0) -> bool:
+    """Initializes PCF8574 Expand8 on target node with an explicit I2C address (default: 32 / 0x20)."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SETUP EXPAND8 OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "SETUP EXPAND8 FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupExpand8 {addr}"
+    print(f"\n[>] Initializing PCF8574 Expand8 on {target} at I2C address {addr} (0x{addr:02X}): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] PCF8574 Expand8 initialized successfully on {target} at address {addr} (0x{addr:02X}) ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupExpand8 did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def write_expand8_bit(client: CoordinatorClient, target: str, bit: int, val: int, timeout: float = 3.0) -> bool:
+    """Writes a single bit (0 or 1) to PCF8574 Expand8 on target node."""
+    got_ack = threading.Event()
+
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "EXPAND8 WR OK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} wrExpand8 {bit} {val}"
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+    return success
+
+
+def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: int = 0, timeout: float = 3.0) -> int | None:
+    """
+    Sends `<target> rdExpand8 <bit>` and waits for `EXPAND8 <bit> IS <val>`.
+    Returns integer bit level (0 or 1) or None on timeout.
+    """
+    got_event = threading.Event()
+    read_val = None
+    pattern = re.compile(rf"EXPAND8\s+{bit}\s+IS\s+([01])", re.IGNORECASE)
+
+    def on_rx(msg: str):
+        nonlocal read_val
+        if f"< {target}:" in msg or f"from {target}" in msg or not msg.startswith("< "):
+            m = pattern.search(msg)
+            if m:
+                read_val = int(m.group(1))
+                got_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} rdExpand8 {bit}"
+    client.send_line(cmd)
+    success = got_event.wait(timeout=timeout)
+
+    if not success:
+        # Retry once in case of wireless packet jitter
+        client.send_line(cmd)
+        success = got_event.wait(timeout=timeout)
+
+    client.remove_rx_callback(on_rx)
+    return read_val
+
+
+def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, timeout: float = 3.0) -> bool:
+    """
+    Validates PCF8574 8-bit I/O Expander:
+    1. Explicitly initializes device at address `addr` (SetupExpand8 <addr>).
+    2. Writes alternating 1's and 0's starting with zero LSB:
+       Pattern A: bits 0..7 = [0, 1, 0, 1, 0, 1, 0, 1] (0xAA / 170).
+       Reads each bit (0..7) and verifies all values match.
+    3. Repeats with LSB being 1:
+       Pattern B: bits 0..7 = [1, 0, 1, 0, 1, 0, 1, 0] (0x55 / 85).
+       Reads each bit (0..7) and verifies all values match.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST E] PCF8574 EXPAND8 ALTERNATING BIT TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 / PCF8574 @ 0x{addr:02X})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Step 1: Explicitly initialize PCF8574 at specified address (e.g. 32 / 0x20)
+    setup_expand8(client, target=target, addr=addr, timeout=timeout)
+    time.sleep(0.2)
+
+    all_passed = True
+
+    # Test patterns:
+    # Pattern A: LSB=0 -> [0, 1, 0, 1, 0, 1, 0, 1]
+    # Pattern B: LSB=1 -> [1, 0, 1, 0, 1, 0, 1, 0]
+    patterns = [
+        ("Pattern A (LSB = 0)", [0 if (i % 2 == 0) else 1 for i in range(8)]),
+        ("Pattern B (LSB = 1)", [1 if (i % 2 == 0) else 0 for i in range(8)])
+    ]
+
+    for pat_idx, (pat_name, expected_bits) in enumerate(patterns, start=1):
+        byte_val = sum(b << i for i, b in enumerate(expected_bits))
+        print(f"\n[>] Step {pat_idx}: Testing {pat_name}")
+        print(f"    Target bit pattern (0..7): {expected_bits} (Byte: 0x{byte_val:02X})")
+
+        print("    Writing bits:")
+        for bit in range(8):
+            val = expected_bits[bit]
+            write_expand8_bit(client, target=target, bit=bit, val=val, timeout=timeout)
+            print(f"      wrExpand8 {bit} {val} -> OK")
+            time.sleep(0.04)
+
+        time.sleep(0.1)
+
+        print("    Reading and verifying bits:")
+        pat_ok = True
+        for bit in range(8):
+            expected = expected_bits[bit]
+            actual = read_expand8_bit(client, target=target, bit=bit, timeout=timeout)
+            if actual == expected:
+                print(f"      [+] Bit {bit}: expected {expected}, read {actual} [PASS]")
+            else:
+                print(f"      [-] Bit {bit}: expected {expected}, read {actual} [FAIL]")
+                pat_ok = False
+            time.sleep(0.04)
+
+        if pat_ok:
+            print(f"[+] {pat_name} PASSED (all 8 bits verified)!")
+        else:
+            print(f"[-] {pat_name} FAILED (bit mismatch detected)!")
+            all_passed = False
+
+        time.sleep(0.2)
+
+    print("-" * 65)
+    if all_passed:
+        print(f"[+] TEST PASSED: PCF8574 Expand8 verified for both alternating bit patterns on {target}!")
+    else:
+        print(f"[-] TEST FAILED: PCF8574 Expand8 verification failed on {target}.")
+    return all_passed
+
+
 def run_garage_gpio_test(
     client: CoordinatorClient,
     garage_target: str = "Garage",
@@ -2050,6 +2200,10 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
 
     # Test [B]: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
     results["Bidi_GPIO"] = run_bidirectional_gpio_test(client, kitchen_target=target, garage_target=garage_target, kitchen_pin=21, garage_pin=17)
+    time.sleep(0.5)
+
+    # Test [E]: PCF8574 Expand8 Alternating Bit Test
+    results["Expand8"] = run_expand8_test(client, target=target)
 
     # Print Final Summary Table
     print("\n" + "=" * 65)
@@ -2067,7 +2221,8 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)",
         "APDS9930_Prox":     "[D] APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
         "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
-        "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)"
+        "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
+        "Expand8":           "[E] PCF8574 Expand8 Bit Test  (Alternating 0/1 & 1/0 Patterns)"
     }
 
     all_passed = True
@@ -2164,6 +2319,8 @@ def main():
     parser.add_argument("--garage", type=str, default="Garage", help="Garage node name in coordinator device table (default: Garage)")
     parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
+    parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run PCF8574 Expand8 alternating bit test and exit")
+    parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for PCF8574 Expand8 (default: 32 / 0x20)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -2211,6 +2368,10 @@ def main():
 
         if args.bidi_gpio:
             passed = run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
+            sys.exit(0 if passed else 1)
+
+        if args.expand8:
+            passed = run_expand8_test(client, target=args.target, addr=args.expand8_addr)
             sys.exit(0 if passed else 1)
 
         if args.bridge:
@@ -2292,6 +2453,7 @@ def main():
             print("  [R] Read Proximity Value        (ReadProximity)")
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
             print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
+            print("  [E] PCF8574 Expand8 Test        (Alternating 0/1 & 1/0 Bit Patterns)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -2300,7 +2462,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -2346,6 +2508,8 @@ def main():
                 run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
             elif choice in ("B", "BIDI"):
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
+            elif choice in ("E", "EXPAND8", "PCF8574"):
+                run_expand8_test(client, target=args.target)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

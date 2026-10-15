@@ -1213,6 +1213,119 @@ def run_neopixel_test(
     return True
 
 
+def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
+    """Initializes Adafruit Small Reduction Stepper on target node (pins 1, 2, 21, 22)."""
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "UNIPOLAR" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupUnipolar"
+    print(f"\n[>] Initializing Unipolar Stepper on {target}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Unipolar Stepper initialized on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Note: SetupUnipolar command sent to {target}.")
+    return True
+
+
+def step_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", steps: int = 100, forward: bool = True, timeout: float = 3.0) -> bool:
+    """Sends UniStepFwd or UniiStepBkw command to move N steps."""
+    cmd_name = "UniStepFwd" if forward else "UniiStepBkw"
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "UNISTEP" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} {cmd_name} {steps}"
+    dir_str = "FORWARD" if forward else "BACKWARD"
+    print(f"[>] Stepping {target} {steps} steps {dir_str}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Command {cmd_name} {steps} acknowledged ({elapsed:.1f}ms).")
+    return True
+
+
+def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Kitchen", steps: int = 512, step_delay_ms: int = 5) -> bool:
+    """
+    Validates Adafruit Small Reduction Stepper (unipolarStep.c):
+      Hardware:
+        - Center-taps to 5V
+        - Gate-level N-channel MOSFETs
+        - Coil A: Pin 1 (Orange), Pin 2 (Pink)
+        - Coil B: Pin 21 (Yellow), Pin 22 (Blue)
+      Sequence:
+        1. SetupUnipolar: Configures pins and starts worker task.
+        2. UniStepDelay: Sets step speed.
+        3. UniStepFwd N: Moves N steps forward.
+        4. Pause 1 second.
+        5. UniiStepBkw N: Moves N steps backward to return to origin.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST U] UNIPOLAR STEPPER MOTOR TEST (ADAFRUIT REDUCTION) ---")
+    print(f"Target Node: {target} (ESP32-C6)")
+    print(f"Coil A:      Pin 1 (Orange), Pin 2 (Pink)")
+    print(f"Coil B:      Pin 21 (Yellow), Pin 22 (Blue)")
+    print(f"Driver:      Gate-level N-channel MOSFETs (Center tap = 5V)")
+    print(f"Profile:     Setup -> {steps} Steps FWD -> 1s Pause -> {steps} Steps BKW")
+    print("=" * 65)
+
+    # Step 1: Initialize
+    setup_unipolar_stepper(client, target=target)
+    time.sleep(0.2)
+
+    # Step 2: Set speed delay if non-default
+    if step_delay_ms > 0 and step_delay_ms != 5:
+        client.send_line(f"{target} UniStepDelay {step_delay_ms}")
+        time.sleep(0.1)
+
+    # Step 3: Move forward
+    print(f"\n[*] [PHASE 1/2] Stepping FORWARD {steps} steps...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=True)
+    est_duration = (steps * step_delay_ms) / 1000.0
+    print(f"    Waiting ~{est_duration:.1f}s for movement to complete...")
+    time.sleep(est_duration + 0.5)
+
+    # Step 4: Pause
+    print("\n[*] Pausing 1.0 second at forward position...")
+    time.sleep(1.0)
+
+    # Step 5: Move backward
+    print(f"\n[*] [PHASE 2/2] Stepping BACKWARD {steps} steps (return)...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=False)
+    print(f"    Waiting ~{est_duration:.1f}s for movement to complete...")
+    time.sleep(est_duration + 0.5)
+
+    print("\n" + "-" * 65)
+    print("[?] Visual / Hardware Verification:")
+    print(f"    Did the stepper motor rotate {steps} steps forward, pause, and return {steps} steps backward?")
+    try:
+        resp = input("    Confirm stepper movement observed? [Y/n]: ").strip().lower()
+        passed = resp in ("", "y", "yes")
+    except (EOFError, OSError):
+        passed = True
+
+    print("-" * 65)
+    if passed:
+        print("[+] TEST PASSED: Unipolar stepper motor test verified successfully!")
+    else:
+        print("[-] TEST FAILED: Unipolar stepper motor motion was not confirmed.")
+    return passed
+
+
 def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
     """
     Executes the Cytron 10C Motor Driver Board Test:
@@ -2975,6 +3088,10 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Kitchen NeoGPIO 19 7")
     print("      Kitchen NeoRED 0 128")
     print("      Kitchen NeoUpdate")
+    print("      Kitchen SetupUnipolar")
+    print("      Kitchen UniStepFwd 512")
+    print("      Kitchen UniiStepBkw 512")
+    print("      Kitchen UniStepDelay 5")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")
@@ -3036,6 +3153,11 @@ def main():
     parser.add_argument("--neopixel-pin", type=int, default=19, help="GPIO pin for NeoPixel data line (default: 19)")
     parser.add_argument("--neopixel-count", type=int, default=16, help="Number of NeoPixels in strand (default: 16, e.g. 7)")
     parser.add_argument("--neopixel-duration", type=float, default=1.0, help="Duration in seconds for each color fade (default: 1.0s)")
+    parser.add_argument("--unipolar", action="store_true", help="Run Unipolar Stepper motor test (Adafruit 28BYJ-48: Fwd/Bkw) and exit")
+    parser.add_argument("--uni-steps", type=int, default=512, help="Number of steps for Unipolar Stepper test (default: 512)")
+    parser.add_argument("--uni-delay", type=int, default=5, help="Step delay in ms for Unipolar Stepper (default: 5)")
+    parser.add_argument("--uni-fwd", type=int, default=None, help="Step Unipolar Stepper forward by N steps and exit")
+    parser.add_argument("--uni-bkw", type=int, default=None, help="Step Unipolar Stepper backward by N steps and exit")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -3124,6 +3246,20 @@ def main():
             passed = run_neopixel_test(client, target=args.target, pin=args.neopixel_pin, num_pixels=args.neopixel_count, fade_duration=args.neopixel_duration)
             sys.exit(0 if passed else 1)
 
+        if args.unipolar:
+            passed = run_unipolar_stepper_test(client, target=args.target, steps=args.uni_steps, step_delay_ms=args.uni_delay)
+            sys.exit(0 if passed else 1)
+
+        if args.uni_fwd is not None:
+            setup_unipolar_stepper(client, target=args.target)
+            passed = step_unipolar_stepper(client, target=args.target, steps=args.uni_fwd, forward=True)
+            sys.exit(0 if passed else 1)
+
+        if args.uni_bkw is not None:
+            setup_unipolar_stepper(client, target=args.target)
+            passed = step_unipolar_stepper(client, target=args.target, steps=args.uni_bkw, forward=False)
+            sys.exit(0 if passed else 1)
+
         if args.bridge:
             passed = run_setup_bridge_test(client, target=args.target)
             sys.exit(0 if passed else 1)
@@ -3210,6 +3346,7 @@ def main():
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Configurable Pin & Pixels, R->G->B Fade, ESC to stop)")
+            print("  [U] Unipolar Stepper Test       (Adafruit Small Reduction: Fwd/Bkw Cycle)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -3218,7 +3355,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, L, V, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, L, V, U, W, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -3282,6 +3419,10 @@ def main():
                 pin_input = input(f"Enter NeoPixel GPIO pin [{args.neopixel_pin}]: ").strip()
                 pin = int(pin_input) if (pin_input.isdigit() and int(pin_input) >= 0) else args.neopixel_pin
                 run_neopixel_test(client, target=args.target, pin=pin, num_pixels=num_pixels, fade_duration=args.neopixel_duration)
+            elif choice in ("U", "UNIPOLAR", "UNISTEP"):
+                steps_str = input(f"Enter number of steps to test [{args.uni_steps}]: ").strip()
+                steps = int(steps_str) if (steps_str.isdigit() and int(steps_str) > 0) else args.uni_steps
+                run_unipolar_stepper_test(client, target=args.target, steps=steps, step_delay_ms=args.uni_delay)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

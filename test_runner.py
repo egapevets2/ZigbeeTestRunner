@@ -1213,7 +1213,7 @@ def run_neopixel_test(
     return True
 
 
-def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
+def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", timeout: float = 3.0) -> bool:
     """Initializes Adafruit Small Reduction Stepper on target node (pins 1, 2, 21, 22)."""
     got_ack = threading.Event()
     def on_rx(msg: str):
@@ -1236,7 +1236,7 @@ def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", t
     return True
 
 
-def step_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", steps: int = 100, forward: bool = True, timeout: float = 3.0) -> bool:
+def step_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", steps: int = 100, forward: bool = True, timeout: float = 3.0) -> bool:
     """Sends UniStepFwd or UniiStepBkw command to move N steps."""
     cmd_name = "UniStepFwd" if forward else "UniiStepBkw"
     got_ack = threading.Event()
@@ -1259,7 +1259,7 @@ def step_unipolar_stepper(client: CoordinatorClient, target: str = "Kitchen", st
     return True
 
 
-def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Kitchen", steps: int = 512, step_delay_ms: int = 5) -> bool:
+def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 5) -> bool:
     """
     Validates Adafruit Small Reduction Stepper (unipolarStep.c):
       Hardware:
@@ -3088,10 +3088,10 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Kitchen NeoGPIO 19 7")
     print("      Kitchen NeoRED 0 128")
     print("      Kitchen NeoUpdate")
-    print("      Kitchen SetupUnipolar")
-    print("      Kitchen UniStepFwd 512")
-    print("      Kitchen UniiStepBkw 512")
-    print("      Kitchen UniStepDelay 5")
+    print("      Garage SetupUnipolar")
+    print("      Garage UniStepFwd 512")
+    print("      Garage UniiStepBkw 512")
+    print("      Garage UniStepDelay 5")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")
@@ -3247,17 +3247,17 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.unipolar:
-            passed = run_unipolar_stepper_test(client, target=args.target, steps=args.uni_steps, step_delay_ms=args.uni_delay)
+            passed = run_unipolar_stepper_test(client, target=args.garage, steps=args.uni_steps, step_delay_ms=args.uni_delay)
             sys.exit(0 if passed else 1)
 
         if args.uni_fwd is not None:
-            setup_unipolar_stepper(client, target=args.target)
-            passed = step_unipolar_stepper(client, target=args.target, steps=args.uni_fwd, forward=True)
+            setup_unipolar_stepper(client, target=args.garage)
+            passed = step_unipolar_stepper(client, target=args.garage, steps=args.uni_fwd, forward=True)
             sys.exit(0 if passed else 1)
 
         if args.uni_bkw is not None:
-            setup_unipolar_stepper(client, target=args.target)
-            passed = step_unipolar_stepper(client, target=args.target, steps=args.uni_bkw, forward=False)
+            setup_unipolar_stepper(client, target=args.garage)
+            passed = step_unipolar_stepper(client, target=args.garage, steps=args.uni_bkw, forward=False)
             sys.exit(0 if passed else 1)
 
         if args.bridge:
@@ -3346,7 +3346,7 @@ def main():
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Configurable Pin & Pixels, R->G->B Fade, ESC to stop)")
-            print("  [U] Unipolar Stepper Test       (Adafruit Small Reduction: Fwd/Bkw Cycle)")
+            print("  [U] Unipolar Stepper Test       (Garage: Adafruit Small Reduction Fwd/Bkw)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
@@ -3422,7 +3422,7 @@ def main():
             elif choice in ("U", "UNIPOLAR", "UNISTEP"):
                 steps_str = input(f"Enter number of steps to test [{args.uni_steps}]: ").strip()
                 steps = int(steps_str) if (steps_str.isdigit() and int(steps_str) > 0) else args.uni_steps
-                run_unipolar_stepper_test(client, target=args.target, steps=steps, step_delay_ms=args.uni_delay)
+                run_unipolar_stepper_test(client, target=args.garage, steps=steps, step_delay_ms=args.uni_delay)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

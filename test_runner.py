@@ -1259,7 +1259,7 @@ def step_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", ste
     return True
 
 
-def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 5) -> bool:
+def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 5, mode: int = 0) -> bool:
     """
     Validates Adafruit Small Reduction Stepper (unipolarStep.c):
       Hardware:
@@ -1269,16 +1269,23 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         - Coil B: Pin 21 (Yellow), Pin 22 (Blue)
       Sequence:
         1. SetupUnipolar: Configures pins and starts worker task.
-        2. UniStepDelay: Sets step speed.
-        3. UniStepFwd N: Moves N steps forward.
-        4. Pause 1 second.
-        5. UniiStepBkw N: Moves N steps backward to return to origin.
+        2. UniStepMode: Selects drive mode (0=Full-step, 1=Half-step, 2=Wave drive).
+        3. UniStepDelay: Sets step speed.
+        4. UniStepFwd N: Moves N steps forward.
+        5. Pause 1 second.
+        6. UniiStepBkw N: Moves N steps backward to return to origin.
     """
+    mode_names = {0: "Full-Step (Dual Coil)", 1: "Half-Step (8-Step)", 2: "Wave Drive (Single Coil)"}
+    mode_desc = mode_names.get(mode, f"Mode {mode}")
+
     print("\n" + "=" * 65)
     print("--- [TEST U] UNIPOLAR STEPPER MOTOR TEST (ADAFRUIT REDUCTION) ---")
     print(f"Target Node: {target} (ESP32-C6)")
-    print(f"Coil A:      Pin 1 (Orange), Pin 2 (Pink)")
-    print(f"Coil B:      Pin 21 (Yellow), Pin 22 (Blue)")
+    print(f"Coil 1:      Pin 1 (Orange)")
+    print(f"Coil 2:      Pin 2 (Pink)")
+    print(f"Coil 3:      Pin 21 (Yellow)")
+    print(f"Coil 4:      Pin 22 (Blue)")
+    print(f"Drive Mode:  {mode_desc}")
     print(f"Driver:      Gate-level N-channel MOSFETs (Center tap = 5V)")
     print(f"Profile:     Setup -> {steps} Steps FWD -> 1s Pause -> {steps} Steps BKW")
     print("=" * 65)
@@ -1286,6 +1293,11 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     # Step 1: Initialize
     setup_unipolar_stepper(client, target=target)
     time.sleep(0.2)
+
+    # Step 1b: Set drive mode if non-default
+    if mode != 0:
+        client.send_line(f"{target} UniStepMode {mode}")
+        time.sleep(0.1)
 
     # Step 2: Set speed delay if non-default
     if step_delay_ms > 0 and step_delay_ms != 5:
@@ -3156,6 +3168,7 @@ def main():
     parser.add_argument("--unipolar", action="store_true", help="Run Unipolar Stepper motor test (Adafruit 28BYJ-48: Fwd/Bkw) and exit")
     parser.add_argument("--uni-steps", type=int, default=512, help="Number of steps for Unipolar Stepper test (default: 512)")
     parser.add_argument("--uni-delay", type=int, default=5, help="Step delay in ms for Unipolar Stepper (default: 5)")
+    parser.add_argument("--uni-mode", type=int, default=0, choices=[0, 1, 2], help="Drive mode for Unipolar Stepper: 0=Full-step (default), 1=Half-step, 2=Wave drive")
     parser.add_argument("--uni-fwd", type=int, default=None, help="Step Unipolar Stepper forward by N steps and exit")
     parser.add_argument("--uni-bkw", type=int, default=None, help="Step Unipolar Stepper backward by N steps and exit")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
@@ -3247,7 +3260,7 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.unipolar:
-            passed = run_unipolar_stepper_test(client, target=args.garage, steps=args.uni_steps, step_delay_ms=args.uni_delay)
+            passed = run_unipolar_stepper_test(client, target=args.garage, steps=args.uni_steps, step_delay_ms=args.uni_delay, mode=args.uni_mode)
             sys.exit(0 if passed else 1)
 
         if args.uni_fwd is not None:
@@ -3422,7 +3435,7 @@ def main():
             elif choice in ("U", "UNIPOLAR", "UNISTEP"):
                 steps_str = input(f"Enter number of steps to test [{args.uni_steps}]: ").strip()
                 steps = int(steps_str) if (steps_str.isdigit() and int(steps_str) > 0) else args.uni_steps
-                run_unipolar_stepper_test(client, target=args.garage, steps=steps, step_delay_ms=args.uni_delay)
+                run_unipolar_stepper_test(client, target=args.garage, steps=steps, step_delay_ms=args.uni_delay, mode=args.uni_mode)
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             elif choice in ("N", "REPORT"):

@@ -1084,37 +1084,50 @@ def run_garage_rgb_fade_test(
     return True
 
 
-def clear_neopixels(client: CoordinatorClient, target: str = "Kitchen", num_pixels: int = 16) -> None:
+def clear_neopixels(client: CoordinatorClient, target: str = "Kitchen", num_pixels: int = 16, timeout: float = 1.0) -> bool:
     """Sets all pixels in the strand to black (0, 0, 0) and refreshes the strip."""
-    for i in range(num_pixels):
-        client.send_line(f"{target} NeoRED {i} 0")
-        client.send_line(f"{target} NeoGREEN {i} 0")
-        client.send_line(f"{target} NeoBLUE {i} 0")
-        time.sleep(0.008)
-    client.send_line(f"{target} NeoUpdate")
-    time.sleep(0.04)
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "NEO" in msg or "OK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} NeoClear"
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+    if not success:
+        client.send_line(cmd)
+        time.sleep(0.04)
+    return True
 
 
 def setup_neopixel(client: CoordinatorClient, target: str = "Kitchen", pin: int = 19, num_pixels: int = 16) -> bool:
     """Configures NeoPixel driver on target node at specified GPIO pin and pixel count, and zeroes all pixels."""
     print(f"\n[>] Configuring NeoPixel on {target} Pin {pin} ({num_pixels} pixels): \"{target} NeoGPIO {pin} {num_pixels}\"")
     client.send_line(f"{target} NeoGPIO {pin} {num_pixels}")
-    time.sleep(0.08)
+    time.sleep(0.12)
     clear_neopixels(client, target=target, num_pixels=num_pixels)
     print(f"[+] NeoPixel initialized on {target} Pin {pin} ({num_pixels} pixels cleared to black).")
     return True
 
 
-def turn_off_neopixel(client: CoordinatorClient, target: str, pixel_idx: int) -> None:
+def turn_off_neopixel(client: CoordinatorClient, target: str, pixel_idx: int, timeout: float = 1.0) -> bool:
     """Explicitly turns off a single NeoPixel (0, 0, 0) and refreshes the strip."""
-    client.send_line(f"{target} NeoRED {pixel_idx} 0")
-    time.sleep(0.005)
-    client.send_line(f"{target} NeoGREEN {pixel_idx} 0")
-    time.sleep(0.005)
-    client.send_line(f"{target} NeoBLUE {pixel_idx} 0")
-    time.sleep(0.005)
-    client.send_line(f"{target} NeoUpdate")
-    time.sleep(0.01)
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "NEO" in msg or "OK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} NeoOff {pixel_idx}"
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+    if not success:
+        client.send_line(cmd)
+        time.sleep(0.04)
+    return True
 
 
 def fade_neopixel_color(
@@ -1124,7 +1137,7 @@ def fade_neopixel_color(
     color_cmd: str,
     max_val: int = 128,
     duration: float = 1.0,
-    steps: int = 10
+    steps: int = 8
 ) -> bool:
     """
     Fades a single NeoPixel color from 0 -> max_val -> 0 over duration seconds.
@@ -1138,7 +1151,7 @@ def fade_neopixel_color(
     for val in all_vals:
         t0 = time.time()
         client.send_line(f"{target} {color_cmd} {pixel_idx} {val}")
-        time.sleep(0.005)
+        time.sleep(0.015)
         client.send_line(f"{target} NeoUpdate")
 
         elapsed = time.time() - t0

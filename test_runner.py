@@ -1279,7 +1279,6 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         4. Pass 2 (Half speed = 2 * UNIPOLAR_DEFAULT_DELAY_MS):
            - UniStepDelay <delay_2>
            - UniStepFwd N -> Pause 1s -> UniiStepBkw N
-        5. Restore UniStepDelay <delay_1>.
     """
     delay_1 = step_delay_ms if step_delay_ms > 0 else UNIPOLAR_DEFAULT_DELAY_MS
     delay_2 = 2 * delay_1
@@ -1360,9 +1359,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     print(f"    Waiting ~{est_duration_2:.1f}s for movement to complete...")
     time.sleep(est_duration_2 + 0.5)
 
-    # Restore default delay on target
-    client.send_line(f"{target} UniStepDelay {delay_1}")
-    time.sleep(0.1)
+    # Keep delay as set by Pass 2 (delay_2) so end device preserves this speed
 
     print("\n" + "-" * 65)
     print("[?] Visual / Hardware Verification:")

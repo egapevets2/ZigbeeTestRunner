@@ -1259,7 +1259,7 @@ def step_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", ste
     return True
 
 
-def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 5, mode: int = 0) -> bool:
+def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 10, mode: int = 0) -> bool:
     """
     Validates Adafruit Small Reduction Stepper (unipolarStep.c):
       Hardware:
@@ -1299,8 +1299,8 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         client.send_line(f"{target} UniStepMode {mode}")
         time.sleep(0.1)
 
-    # Step 2: Set speed delay if non-default
-    if step_delay_ms > 0 and step_delay_ms != 5:
+    # Step 2: Set speed delay
+    if step_delay_ms > 0:
         client.send_line(f"{target} UniStepDelay {step_delay_ms}")
         time.sleep(0.1)
 
@@ -3167,7 +3167,7 @@ def main():
     parser.add_argument("--neopixel-duration", type=float, default=1.0, help="Duration in seconds for each color fade (default: 1.0s)")
     parser.add_argument("--unipolar", action="store_true", help="Run Unipolar Stepper motor test (Adafruit 28BYJ-48: Fwd/Bkw) and exit")
     parser.add_argument("--uni-steps", type=int, default=512, help="Number of steps for Unipolar Stepper test (default: 512)")
-    parser.add_argument("--uni-delay", type=int, default=5, help="Step delay in ms for Unipolar Stepper (default: 5)")
+    parser.add_argument("--uni-delay", type=int, default=10, help="Step delay in ms for Unipolar Stepper (default: 10)")
     parser.add_argument("--uni-mode", type=int, default=0, choices=[0, 1, 2], help="Drive mode for Unipolar Stepper: 0=Full-step (default), 1=Half-step, 2=Wave drive")
     parser.add_argument("--uni-fwd", type=int, default=None, help="Step Unipolar Stepper forward by N steps and exit")
     parser.add_argument("--uni-bkw", type=int, default=None, help="Step Unipolar Stepper backward by N steps and exit")

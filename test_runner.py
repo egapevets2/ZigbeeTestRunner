@@ -1105,6 +1105,18 @@ def setup_neopixel(client: CoordinatorClient, target: str = "Kitchen", pin: int 
     return True
 
 
+def turn_off_neopixel(client: CoordinatorClient, target: str, pixel_idx: int) -> None:
+    """Explicitly turns off a single NeoPixel (0, 0, 0) and refreshes the strip."""
+    client.send_line(f"{target} NeoRED {pixel_idx} 0")
+    time.sleep(0.005)
+    client.send_line(f"{target} NeoGREEN {pixel_idx} 0")
+    time.sleep(0.005)
+    client.send_line(f"{target} NeoBLUE {pixel_idx} 0")
+    time.sleep(0.005)
+    client.send_line(f"{target} NeoUpdate")
+    time.sleep(0.01)
+
+
 def fade_neopixel_color(
     client: CoordinatorClient,
     target: str,
@@ -1143,6 +1155,7 @@ def run_neopixel_test(
     pin: int = 19,
     num_pixels: int = 16,
     fade_duration: float = 1.0,
+    off_duration: float = 0.5,
     max_brightness: int = 128
 ) -> bool:
     """
@@ -1151,6 +1164,7 @@ def run_neopixel_test(
       1. Fades dark -> 50% Red -> dark in 1 second.
       2. Fades dark -> 50% Green -> dark in 1 second.
       3. Fades dark -> 50% Blue -> dark in 1 second.
+      4. Explicitly turns OFF the LED before moving to the next LED.
     Continues cycling strand until user hits ESC.
     """
     print("\n" + "=" * 65)
@@ -1158,8 +1172,8 @@ def run_neopixel_test(
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Hardware:    Pin {pin} -> 74HCT125 Level Shifter -> {num_pixels}-NeoPixel Strand")
     print(f"Brightness:  Dark (0) -> 50% ({max_brightness}) -> Dark (0)")
-    print(f"Timing:      {fade_duration:.1f}s per color fade (3.0s per pixel)")
-    print(f"Pattern:     LED 1..{num_pixels} (Red -> Green -> Blue), then repeat")
+    print(f"Timing:      {fade_duration:.1f}s per color fade, {off_duration:.1f}s OFF between LEDs")
+    print(f"Pattern:     LED 1..{num_pixels} (Red -> Green -> Blue -> OFF), then repeat")
     print("Action:      Cycling strand continuously. Press [ESC] to stop.")
     print("=" * 65)
 
@@ -1197,6 +1211,13 @@ def run_neopixel_test(
                 # 3. Blue fade
                 print(f"      - Blue:  0 -> {max_brightness} -> 0 ({fade_duration:.1f}s)...")
                 if not fade_neopixel_color(client, target, p, "NeoBLUE", max_val=max_brightness, duration=fade_duration):
+                    stopped = True
+                    break
+
+                # 4. Turn OFF before moving to next LED
+                print(f"      - OFF:   Zeroing pixel {pixel_num} before next LED ({off_duration:.1f}s)...")
+                turn_off_neopixel(client, target, p)
+                if sleep_or_esc(off_duration):
                     stopped = True
                     break
 
@@ -3252,6 +3273,7 @@ def main():
     parser.add_argument("--neopixel-pin", type=int, default=19, help="GPIO pin for NeoPixel data line (default: 19)")
     parser.add_argument("--neopixel-count", type=int, default=16, help="Number of NeoPixels in strand (default: 16, e.g. 7)")
     parser.add_argument("--neopixel-duration", type=float, default=1.0, help="Duration in seconds for each color fade (default: 1.0s)")
+    parser.add_argument("--neopixel-off-duration", type=float, default=0.5, help="Duration in seconds for OFF state between LEDs (default: 0.5s)")
     parser.add_argument("--unipolar", action="store_true", help="Run Unipolar Stepper motor test (Adafruit 28BYJ-48: Fwd/Bkw) and exit")
     parser.add_argument("--uni-steps", type=int, default=512, help="Number of steps for Unipolar Stepper test (default: 512)")
     parser.add_argument("--uni-delay", type=int, default=UNIPOLAR_DEFAULT_DELAY_MS, help=f"Step delay in ms for Unipolar Stepper (default: {UNIPOLAR_DEFAULT_DELAY_MS})")
@@ -3343,7 +3365,7 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.neopixel:
-            passed = run_neopixel_test(client, target=args.target, pin=args.neopixel_pin, num_pixels=args.neopixel_count, fade_duration=args.neopixel_duration)
+            passed = run_neopixel_test(client, target=args.target, pin=args.neopixel_pin, num_pixels=args.neopixel_count, fade_duration=args.neopixel_duration, off_duration=args.neopixel_off_duration)
             sys.exit(0 if passed else 1)
 
         if args.unipolar:
@@ -3518,7 +3540,7 @@ def main():
                 num_pixels = int(pixels_input) if (pixels_input.isdigit() and int(pixels_input) > 0) else args.neopixel_count
                 pin_input = input(f"Enter NeoPixel GPIO pin [{args.neopixel_pin}]: ").strip()
                 pin = int(pin_input) if (pin_input.isdigit() and int(pin_input) >= 0) else args.neopixel_pin
-                run_neopixel_test(client, target=args.target, pin=pin, num_pixels=num_pixels, fade_duration=args.neopixel_duration)
+                run_neopixel_test(client, target=args.target, pin=pin, num_pixels=num_pixels, fade_duration=args.neopixel_duration, off_duration=args.neopixel_off_duration)
             elif choice in ("U", "UNIPOLAR", "UNISTEP"):
                 steps_str = input(f"Enter number of steps to test [{args.uni_steps}]: ").strip()
                 steps = int(steps_str) if (steps_str.isdigit() and int(steps_str) > 0) else args.uni_steps

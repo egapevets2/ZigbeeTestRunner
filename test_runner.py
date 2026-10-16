@@ -1213,6 +1213,9 @@ def run_neopixel_test(
     return True
 
 
+UNIPOLAR_DEFAULT_DELAY_MS = 10
+
+
 def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", timeout: float = 3.0) -> bool:
     """Initializes Adafruit Small Reduction Stepper on target node (pins 1, 2, 21, 22)."""
     got_ack = threading.Event()
@@ -1259,9 +1262,9 @@ def step_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", ste
     return True
 
 
-def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = 10, mode: int = 0) -> bool:
+def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = UNIPOLAR_DEFAULT_DELAY_MS, mode: int = 0) -> bool:
     """
-    Validates Adafruit Small Reduction Stepper (unipolarStep.c):
+    Validates Adafruit Small Reduction Stepper (unipolarStep.c) with Speed Test:
       Hardware:
         - Center-taps to 5V
         - Gate-level N-channel MOSFETs
@@ -1270,16 +1273,22 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
       Sequence:
         1. SetupUnipolar: Configures pins and starts worker task.
         2. UniStepMode: Selects drive mode (0=Full-step, 1=Half-step, 2=Wave drive).
-        3. UniStepDelay: Sets step speed.
-        4. UniStepFwd N: Moves N steps forward.
-        5. Pause 1 second.
-        6. UniiStepBkw N: Moves N steps backward to return to origin.
+        3. Pass 1 (Standard delay = UNIPOLAR_DEFAULT_DELAY_MS):
+           - UniStepDelay <delay_1>
+           - UniStepFwd N -> Pause 1s -> UniiStepBkw N -> Pause 1s
+        4. Pass 2 (Half speed = 2 * UNIPOLAR_DEFAULT_DELAY_MS):
+           - UniStepDelay <delay_2>
+           - UniStepFwd N -> Pause 1s -> UniiStepBkw N
+        5. Restore UniStepDelay <delay_1>.
     """
+    delay_1 = step_delay_ms if step_delay_ms > 0 else UNIPOLAR_DEFAULT_DELAY_MS
+    delay_2 = 2 * delay_1
+
     mode_names = {0: "Full-Step (Dual Coil)", 1: "Half-Step (8-Step)", 2: "Wave Drive (Single Coil)"}
     mode_desc = mode_names.get(mode, f"Mode {mode}")
 
     print("\n" + "=" * 65)
-    print("--- [TEST U] UNIPOLAR STEPPER MOTOR TEST (ADAFRUIT REDUCTION) ---")
+    print("--- [TEST U] UNIPOLAR STEPPER MOTOR TEST & SPEED TEST ---")
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Coil 1:      Pin 1 (Orange)")
     print(f"Coil 2:      Pin 2 (Pink)")
@@ -1287,7 +1296,8 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     print(f"Coil 4:      Pin 22 (Blue)")
     print(f"Drive Mode:  {mode_desc}")
     print(f"Driver:      Gate-level N-channel MOSFETs (Center tap = 5V)")
-    print(f"Profile:     Setup -> {steps} Steps FWD -> 1s Pause -> {steps} Steps BKW")
+    print(f"Pass 1:      Standard Speed ({delay_1}ms delay): {steps} FWD -> 1s Pause -> {steps} BKW")
+    print(f"Pass 2:      Half Speed ({delay_2}ms delay = 2x delay): {steps} FWD -> 1s Pause -> {steps} BKW")
     print("=" * 65)
 
     # Step 1: Initialize
@@ -1299,31 +1309,66 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         client.send_line(f"{target} UniStepMode {mode}")
         time.sleep(0.1)
 
-    # Step 2: Set speed delay
-    if step_delay_ms > 0:
-        client.send_line(f"{target} UniStepDelay {step_delay_ms}")
-        time.sleep(0.1)
+    # -------------------------------------------------------------
+    # PASS 1: Run at UNIPOLAR_DEFAULT_DELAY_MS (Standard Speed)
+    # -------------------------------------------------------------
+    print(f"\n[>>>] === PASS 1: STANDARD SPEED ({delay_1}ms per step) ===")
+    client.send_line(f"{target} UniStepDelay {delay_1}")
+    time.sleep(0.1)
 
-    # Step 3: Move forward
-    print(f"\n[*] [PHASE 1/2] Stepping FORWARD {steps} steps...")
+    # Pass 1 - Forward
+    print(f"\n[*] [PASS 1 - PHASE 1/2] Stepping FORWARD {steps} steps ({delay_1}ms delay)...")
     step_unipolar_stepper(client, target=target, steps=steps, forward=True)
-    est_duration = (steps * step_delay_ms) / 1000.0
-    print(f"    Waiting ~{est_duration:.1f}s for movement to complete...")
-    time.sleep(est_duration + 0.5)
+    est_duration_1 = (steps * delay_1) / 1000.0
+    print(f"    Waiting ~{est_duration_1:.1f}s for movement to complete...")
+    time.sleep(est_duration_1 + 0.5)
 
-    # Step 4: Pause
+    # Pass 1 - Pause
     print("\n[*] Pausing 1.0 second at forward position...")
     time.sleep(1.0)
 
-    # Step 5: Move backward
-    print(f"\n[*] [PHASE 2/2] Stepping BACKWARD {steps} steps (return)...")
+    # Pass 1 - Backward
+    print(f"\n[*] [PASS 1 - PHASE 2/2] Stepping BACKWARD {steps} steps ({delay_1}ms delay)...")
     step_unipolar_stepper(client, target=target, steps=steps, forward=False)
-    print(f"    Waiting ~{est_duration:.1f}s for movement to complete...")
-    time.sleep(est_duration + 0.5)
+    print(f"    Waiting ~{est_duration_1:.1f}s for movement to complete...")
+    time.sleep(est_duration_1 + 0.5)
+
+    print("\n[*] Pausing 1.0 second before Pass 2 (Half Speed)...")
+    time.sleep(1.0)
+
+    # -------------------------------------------------------------
+    # PASS 2: Run at 2 * UNIPOLAR_DEFAULT_DELAY_MS (Half Speed)
+    # -------------------------------------------------------------
+    print(f"\n[>>>] === PASS 2: HALF SPEED ({delay_2}ms per step = 2x delay) ===")
+    client.send_line(f"{target} UniStepDelay {delay_2}")
+    time.sleep(0.1)
+
+    # Pass 2 - Forward
+    print(f"\n[*] [PASS 2 - PHASE 1/2] Stepping FORWARD {steps} steps ({delay_2}ms delay)...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=True)
+    est_duration_2 = (steps * delay_2) / 1000.0
+    print(f"    Waiting ~{est_duration_2:.1f}s for movement to complete...")
+    time.sleep(est_duration_2 + 0.5)
+
+    # Pass 2 - Pause
+    print("\n[*] Pausing 1.0 second at forward position...")
+    time.sleep(1.0)
+
+    # Pass 2 - Backward
+    print(f"\n[*] [PASS 2 - PHASE 2/2] Stepping BACKWARD {steps} steps ({delay_2}ms delay)...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=False)
+    print(f"    Waiting ~{est_duration_2:.1f}s for movement to complete...")
+    time.sleep(est_duration_2 + 0.5)
+
+    # Restore default delay on target
+    client.send_line(f"{target} UniStepDelay {delay_1}")
+    time.sleep(0.1)
 
     print("\n" + "-" * 65)
     print("[?] Visual / Hardware Verification:")
-    print(f"    Did the stepper motor rotate {steps} steps forward, pause, and return {steps} steps backward?")
+    print(f"    Did the stepper motor perform both cycles:")
+    print(f"      1) FWD then BKW at {delay_1}ms delay (standard speed)")
+    print(f"      2) FWD then BKW at {delay_2}ms delay (half speed)?")
     try:
         resp = input("    Confirm stepper movement observed? [Y/n]: ").strip().lower()
         passed = resp in ("", "y", "yes")
@@ -1332,7 +1377,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
 
     print("-" * 65)
     if passed:
-        print("[+] TEST PASSED: Unipolar stepper motor test verified successfully!")
+        print("[+] TEST PASSED: Unipolar stepper motor speed test verified successfully!")
     else:
         print("[-] TEST FAILED: Unipolar stepper motor motion was not confirmed.")
     return passed
@@ -3167,7 +3212,7 @@ def main():
     parser.add_argument("--neopixel-duration", type=float, default=1.0, help="Duration in seconds for each color fade (default: 1.0s)")
     parser.add_argument("--unipolar", action="store_true", help="Run Unipolar Stepper motor test (Adafruit 28BYJ-48: Fwd/Bkw) and exit")
     parser.add_argument("--uni-steps", type=int, default=512, help="Number of steps for Unipolar Stepper test (default: 512)")
-    parser.add_argument("--uni-delay", type=int, default=10, help="Step delay in ms for Unipolar Stepper (default: 10)")
+    parser.add_argument("--uni-delay", type=int, default=UNIPOLAR_DEFAULT_DELAY_MS, help=f"Step delay in ms for Unipolar Stepper (default: {UNIPOLAR_DEFAULT_DELAY_MS})")
     parser.add_argument("--uni-mode", type=int, default=0, choices=[0, 1, 2], help="Drive mode for Unipolar Stepper: 0=Full-step (default), 1=Half-step, 2=Wave drive")
     parser.add_argument("--uni-fwd", type=int, default=None, help="Step Unipolar Stepper forward by N steps and exit")
     parser.add_argument("--uni-bkw", type=int, default=None, help="Step Unipolar Stepper backward by N steps and exit")
@@ -3359,7 +3404,7 @@ def main():
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Configurable Pin & Pixels, R->G->B Fade, ESC to stop)")
-            print("  [U] Unipolar Stepper Test       (Garage: Adafruit Small Reduction Fwd/Bkw)")
+            print("  [U] Unipolar Stepper Test       (Garage: Adafruit Small Reduction Fwd/Bkw + Speed Test)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")

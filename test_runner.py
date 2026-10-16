@@ -1274,10 +1274,10 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         1. SetupUnipolar: Configures pins and starts worker task.
         2. UniStepMode: Selects drive mode (0=Full-step, 1=Half-step, 2=Wave drive).
         3. Pass 1 (Standard delay = UNIPOLAR_DEFAULT_DELAY_MS):
-           - UniStepDelay <delay_1>
+           - UniStepDelay0 <delay_1>
            - UniStepFwd N -> Pause 1s -> UniiStepBkw N -> Pause 1s
         4. Pass 2 (Half speed = 2 * UNIPOLAR_DEFAULT_DELAY_MS):
-           - UniStepDelay <delay_2>
+           - UniStepDelay0 <delay_2>
            - UniStepFwd N -> Pause 1s -> UniiStepBkw N
     """
     delay_1 = step_delay_ms if step_delay_ms > 0 else UNIPOLAR_DEFAULT_DELAY_MS
@@ -1312,7 +1312,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     # PASS 1: Run at UNIPOLAR_DEFAULT_DELAY_MS (Standard Speed)
     # -------------------------------------------------------------
     print(f"\n[>>>] === PASS 1: STANDARD SPEED ({delay_1}ms per step) ===")
-    client.send_line(f"{target} UniStepDelay {delay_1}")
+    client.send_line(f"{target} UniStepDelay0 {delay_1}")
     time.sleep(0.1)
 
     # Pass 1 - Forward
@@ -1339,7 +1339,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     # PASS 2: Run at 2 * UNIPOLAR_DEFAULT_DELAY_MS (Half Speed)
     # -------------------------------------------------------------
     print(f"\n[>>>] === PASS 2: HALF SPEED ({delay_2}ms per step = 2x delay) ===")
-    client.send_line(f"{target} UniStepDelay {delay_2}")
+    client.send_line(f"{target} UniStepDelay0 {delay_2}")
     time.sleep(0.1)
 
     # Pass 2 - Forward
@@ -3145,7 +3145,7 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Garage SetupUnipolar")
     print("      Garage UniStepFwd 512")
     print("      Garage UniiStepBkw 512")
-    print("      Garage UniStepDelay 5")
+    print("      Garage UniStepDelay0 5")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")

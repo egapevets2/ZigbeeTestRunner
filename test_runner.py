@@ -1264,7 +1264,7 @@ def step_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", ste
 
 def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage", steps: int = 512, step_delay_ms: int = UNIPOLAR_DEFAULT_DELAY_MS, mode: int = 0) -> bool:
     """
-    Validates Adafruit Small Reduction Stepper (unipolarStep.c) with Speed Test:
+    Validates Adafruit Small Reduction Stepper (unipolarStep.c) with Speed & Accel/Decel Tests:
       Hardware:
         - Center-taps to 5V
         - Gate-level N-channel MOSFETs
@@ -1273,12 +1273,16 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
       Sequence:
         1. SetupUnipolar: Configures pins and starts worker task.
         2. UniStepMode: Selects drive mode (0=Full-step, 1=Half-step, 2=Wave drive).
-        3. Pass 1 (Standard delay = UNIPOLAR_DEFAULT_DELAY_MS):
-           - UniStepDelay0 <delay_1>
+        3. Pass 1 (Standard delay = UNIPOLAR_DEFAULT_DELAY_MS, no ramp):
+           - AccelSteps 0, UniStepDelay0 <delay_1>
            - UniStepFwd N -> Pause 1s -> UniiStepBkw N -> Pause 1s
-        4. Pass 2 (Half speed = 2 * UNIPOLAR_DEFAULT_DELAY_MS):
-           - UniStepDelay0 <delay_2>
-           - UniStepFwd N -> Pause 1s -> UniiStepBkw N
+        4. Pass 2 (Half speed = 2 * UNIPOLAR_DEFAULT_DELAY_MS, no ramp):
+           - AccelSteps 0, UniStepDelay0 <delay_2>
+           - UniStepFwd N -> Pause 1s -> UniiStepBkw N -> Pause 1s
+        5. Pass 3 (Acceleration & Deceleration Ramp):
+           - UnitStepDelay0 40, UnitStepDelay1 10, AccelSteps 100
+           - UniStepFwd N (100 accel -> N cruise -> 100 decel) -> Pause 1s
+           - UniiStepBkw N (100 accel -> N cruise -> 100 decel)
     """
     delay_1 = step_delay_ms if step_delay_ms > 0 else UNIPOLAR_DEFAULT_DELAY_MS
     delay_2 = 2 * delay_1
@@ -1287,7 +1291,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     mode_desc = mode_names.get(mode, f"Mode {mode}")
 
     print("\n" + "=" * 65)
-    print("--- [TEST U] UNIPOLAR STEPPER MOTOR TEST & SPEED TEST ---")
+    print("--- [TEST U] UNIPOLAR STEPPER MOTOR: SPEED & ACCEL/DECEL TEST ---")
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Coil 1:      Pin 1 (Orange)")
     print(f"Coil 2:      Pin 2 (Pink)")
@@ -1297,6 +1301,8 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     print(f"Driver:      Gate-level N-channel MOSFETs (Center tap = 5V)")
     print(f"Pass 1:      Standard Speed ({delay_1}ms delay): {steps} FWD -> 1s Pause -> {steps} BKW")
     print(f"Pass 2:      Half Speed ({delay_2}ms delay = 2x delay): {steps} FWD -> 1s Pause -> {steps} BKW")
+    print(f"Pass 3:      Accel/Decel (Delay0=40ms, Delay1=10ms, AccelSteps=100):")
+    print(f"             100 Accel -> {steps} Cruise -> 100 Decel FWD -> 1s Pause -> BKW")
     print("=" * 65)
 
     # Step 1: Initialize
@@ -1311,7 +1317,9 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     # -------------------------------------------------------------
     # PASS 1: Run at UNIPOLAR_DEFAULT_DELAY_MS (Standard Speed)
     # -------------------------------------------------------------
-    print(f"\n[>>>] === PASS 1: STANDARD SPEED ({delay_1}ms per step) ===")
+    print(f"\n[>>>] === PASS 1: STANDARD SPEED ({delay_1}ms per step, AccelSteps=0) ===")
+    client.send_line(f"{target} AccelSteps 0")
+    time.sleep(0.1)
     client.send_line(f"{target} UniStepDelay0 {delay_1}")
     time.sleep(0.1)
 
@@ -1338,7 +1346,9 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     # -------------------------------------------------------------
     # PASS 2: Run at 2 * UNIPOLAR_DEFAULT_DELAY_MS (Half Speed)
     # -------------------------------------------------------------
-    print(f"\n[>>>] === PASS 2: HALF SPEED ({delay_2}ms per step = 2x delay) ===")
+    print(f"\n[>>>] === PASS 2: HALF SPEED ({delay_2}ms per step = 2x delay, AccelSteps=0) ===")
+    client.send_line(f"{target} AccelSteps 0")
+    time.sleep(0.1)
     client.send_line(f"{target} UniStepDelay0 {delay_2}")
     time.sleep(0.1)
 
@@ -1359,13 +1369,46 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     print(f"    Waiting ~{est_duration_2:.1f}s for movement to complete...")
     time.sleep(est_duration_2 + 0.5)
 
-    # Keep delay as set by Pass 2 (delay_2) so end device preserves this speed
+    print("\n[*] Pausing 1.0 second before Pass 3 (Accel / Decel Test)...")
+    time.sleep(1.0)
+
+    # -------------------------------------------------------------
+    # PASS 3: Acceleration / Deceleration Test
+    # -------------------------------------------------------------
+    print(f"\n[>>>] === PASS 3: ACCEL / DECEL TEST (UnitStepDelay0=40, UnitStepDelay1=10, AccelSteps=100) ===")
+    print(f"[*] Setting UnitStepDelay0 40...")
+    client.send_line(f"{target} UnitStepDelay0 40")
+    time.sleep(0.1)
+    print(f"[*] Setting UnitStepDelay1 10...")
+    client.send_line(f"{target} UnitStepDelay1 10")
+    time.sleep(0.1)
+    print(f"[*] Setting AccelSteps 100...")
+    client.send_line(f"{target} AccelSteps 100")
+    time.sleep(0.1)
+
+    # Pass 3 - Forward: starts slow @ 40ms, ramps to 10ms over 100 steps, runs 512 steps @ 10ms, ramps down to 40ms over 100 steps
+    print(f"\n[*] [PASS 3 - PHASE 1/2] Stepping FORWARD {steps} steps (100 accel -> {steps} cruise -> 100 decel)...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=True)
+    est_duration_3 = (100 * 0.025) + (steps * 0.010) + (100 * 0.025)
+    print(f"    Waiting ~{est_duration_3:.1f}s for ramped movement to complete...")
+    time.sleep(est_duration_3 + 1.0)
+
+    # Pass 3 - Pause
+    print("\n[*] Pausing 1.0 second at forward position...")
+    time.sleep(1.0)
+
+    # Pass 3 - Backward: same ramp in reverse
+    print(f"\n[*] [PASS 3 - PHASE 2/2] Stepping BACKWARD {steps} steps (100 accel -> {steps} cruise -> 100 decel)...")
+    step_unipolar_stepper(client, target=target, steps=steps, forward=False)
+    print(f"    Waiting ~{est_duration_3:.1f}s for ramped return movement to complete...")
+    time.sleep(est_duration_3 + 1.0)
 
     print("\n" + "-" * 65)
     print("[?] Visual / Hardware Verification:")
-    print(f"    Did the stepper motor perform both cycles:")
-    print(f"      1) FWD then BKW at {delay_1}ms delay (standard speed)")
-    print(f"      2) FWD then BKW at {delay_2}ms delay (half speed)?")
+    print(f"    Did the stepper motor perform:")
+    print(f"      1) Pass 1: Standard Speed ({delay_1}ms delay)")
+    print(f"      2) Pass 2: Half Speed ({delay_2}ms delay)")
+    print(f"      3) Pass 3: Accel/Decel Ramp (Starts slow at 40ms, ramps to 10ms over 100 steps, runs {steps} steps, ramps down to 40ms over 100 steps)?")
     try:
         resp = input("    Confirm stepper movement observed? [Y/n]: ").strip().lower()
         passed = resp in ("", "y", "yes")
@@ -1374,7 +1417,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
 
     print("-" * 65)
     if passed:
-        print("[+] TEST PASSED: Unipolar stepper motor speed test verified successfully!")
+        print("[+] TEST PASSED: Unipolar stepper motor speed and accel/decel test verified successfully!")
     else:
         print("[-] TEST FAILED: Unipolar stepper motor motion was not confirmed.")
     return passed
@@ -3143,9 +3186,11 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Kitchen NeoRED 0 128")
     print("      Kitchen NeoUpdate")
     print("      Garage SetupUnipolar")
+    print("      Garage UnitStepDelay0 40")
+    print("      Garage UnitStepDelay1 10")
+    print("      Garage AccelSteps 100")
     print("      Garage UniStepFwd 512")
     print("      Garage UniiStepBkw 512")
-    print("      Garage UniStepDelay0 5")
     print("      GiveNetworkReport")
     print("      PingNetwork")
     print("    Type 'exit' or 'quit' to return to menu.\n")
@@ -3401,7 +3446,7 @@ def main():
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Configurable Pin & Pixels, R->G->B Fade, ESC to stop)")
-            print("  [U] Unipolar Stepper Test       (Garage: Adafruit Small Reduction Fwd/Bkw + Speed Test)")
+            print("  [U] Unipolar Stepper Test       (Garage: Fwd/Bkw, Half Speed & Accel/Decel Ramp)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")

@@ -4438,11 +4438,12 @@ def run_mesh_resilience_test(
 
 
 def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen", garage_target: str = "Garage", blink_count: int = 3, blinkx_count: int = 4, dac_val: int = 512) -> bool:
-    """Executes all regression tests in sequence and displays a structured report."""
+    """Executes all fully automated regression tests in sequence and displays a structured pass/fail report."""
     print("\n" + "=" * 65)
-    print("        STARTING FULL ZIGBEE HIL REGRESSION SUITE")
+    print("      STARTING FULLY AUTOMATED ZIGBEE REGRESSION SUITE")
     print(f"Target:    {target} | Garage: {garage_target}")
     print(f"Started:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("Mode:      Fully Automatic (Zero User Input Required)")
     print("=" * 65)
 
     results = {}
@@ -4451,51 +4452,35 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
     results["SetupSerialBridge"] = run_setup_bridge_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 2: ESP32-C6 Onboard LED Blink
-    results["ESP32_Blink"] = run_blink_test(client, target=target, count=blink_count)
-    time.sleep(0.5)
-
-    # Test 3: Arduino DotStar Blinkx
-    results["Arduino_Blinkx"] = run_blinkx_test(client, target=target, count=blinkx_count)
-    time.sleep(0.5)
-
-    # Test 4: Two-Way Serial Ping
+    # Test 2: Two-Way Serial Ping
     results["Serial_Ping"] = run_ping_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 5: Arduino Hardware DAC
+    # Test 3: Arduino Hardware DAC
     results["Arduino_DAC"] = run_dac_test(client, target=target, dac_val=dac_val)
     time.sleep(0.5)
 
-    # Test 6: Closed-Loop DAC -> ADC Loopback
+    # Test 4: Closed-Loop DAC -> ADC Loopback
     results["DAC_ADC_Loopback"] = run_dac_adc_loopback_test(client, target=target)
     time.sleep(0.5)
 
-    # Test 7: Schmitt Trigger Hysteresis Ramp Test
+    # Test 5: Schmitt Trigger Hysteresis Ramp Test
     results["Schmitt_Ramp"] = run_schmitt_hysteresis_ramp_test(client, target=target)
     time.sleep(0.5)
 
-    # Test [S]: Servo / PWM Snap and Slew Test
-    results["Servo_PWM"] = run_servo_pwm_test(client, target=target)
+    # Test 6: Closed-Loop DAC -> ADCpot 20-Detent Ramp Test
+    results["ADCpot_Ramp"] = run_adcpot_ramp_test(client, target=target)
     time.sleep(0.5)
 
-    # Test [M]: Cytron 10C Motor Driver Test (Pin 18 PWM, Pin 20 DIR)
-    results["Cytron_Motor"] = run_cytron_motor_test(client, target=target)
-    time.sleep(0.5)
-
-    # Test [D]: APDS9930 Proximity Sensor Test
-    results["APDS9930_Prox"] = run_proximity_test(client, target=target)
-    time.sleep(0.5)
-
-    # Test [G]: Garage Pin 16 GPIO Input Test
+    # Test 7: Garage Pin 16 GPIO Input Test
     results["Garage_GPIO"] = run_garage_gpio_test(client, garage_target=garage_target, kitchen_target=target)
     time.sleep(0.5)
 
-    # Test [B]: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
+    # Test 8: Bidirectional GPIO Wire Test (Kitchen Pin 21 <-> Garage Pin 17)
     results["Bidi_GPIO"] = run_bidirectional_gpio_test(client, kitchen_target=target, garage_target=garage_target, kitchen_pin=21, garage_pin=17)
     time.sleep(0.5)
 
-    # Test [E]: PCF8574 Expand8 Alternating Bit Test
+    # Test 9: PCF8574 Expand8 Alternating Bit Test
     results["Expand8"] = run_expand8_test(client, target=target)
 
     # Print Final Summary Table
@@ -4504,15 +4489,11 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
     print("=" * 65)
     labels = {
         "SetupSerialBridge": "[2] Setup Serial Bridge",
-        "ESP32_Blink":       f"[3] ESP32-C6 Onboard LED Blink ({blink_count} flashes)",
-        "Arduino_Blinkx":    f"[4] Arduino DotStar Blinkx     ({blinkx_count} flashes)",
         "Serial_Ping":       "[5] Two-Way Serial Ping        (GotPing)",
         "Arduino_DAC":       f"[6] Arduino Hardware DAC        (GotDAC {dac_val})",
         "DAC_ADC_Loopback":  "[8] Closed-Loop DAC -> ADC     (Pin 1 Full V & Pin 0 Half V)",
         "Schmitt_Ramp":      "[9] Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
-        "Servo_PWM":         "[S] Servo / PWM Motion         (Snap & Slew 30)",
-        "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)",
-        "APDS9930_Prox":     "[D] APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
+        "ADCpot_Ramp":       "[A] ADCpot Detent Ramp        (20 Detents, 0 -> 1023 -> 0)",
         "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
         "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
         "Expand8":           "[E] Dual PCF8574 Expand8 Test (Both Chip Instances: Alternating 0/1 & 1/0)"
@@ -4529,7 +4510,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
     print("=" * 65)
     total_tests = len(labels)
     if all_passed:
-        print(f"  >>> ALL REGRESSION TESTS PASSED SUCCESSFULLY! ({total_tests}/{total_tests}) <<<")
+        print(f"  >>> ALL AUTOMATED REGRESSION TESTS PASSED! ({total_tests}/{total_tests}) <<<")
     else:
         print("  >>> ONE OR MORE TESTS FAILED - REVIEW LOGS ABOVE <<<")
     print("=" * 65 + "\n")
@@ -4656,7 +4637,7 @@ def main():
     parser.add_argument("--bipolar-steps", type=int, default=180, help="Number of full-steps for Bipolar Stepper test (default: 180)")
     parser.add_argument("--bipolar-duty", type=int, default=75, help="StepPWMduty percentage for Bipolar Stepper test (default: 75)")
     parser.add_argument("--bipolar-ms", type=int, default=70, help="Delay per step in ms for Bipolar Stepper test (default: 70)")
-    parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
+    parser.add_argument("--all", "--suite", action="store_true", help="Run the automated regression test suite (fully automatic, no user input) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
     parser.add_argument("--mesh-sub2", action="store_true", help="Run Mesh Sub-Test 2 (Reset Garage node only) and exit")
@@ -4838,7 +4819,7 @@ def main():
             print("\n=======================================================")
             print("         ZIGBEE HIL REGRESSION TEST RUNNER")
             print("=======================================================")
-            print("  [1] Run Full Regression Test Suite (Tests 1-12)")
+            print("  [1] Run Automated Regression Test Suite (Fully Automatic - No User Input)")
             print("  [2] Setup Serial Bridge (SetupSerialBridge)")
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")

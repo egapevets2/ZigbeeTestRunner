@@ -4833,6 +4833,7 @@ def main():
             print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
+            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
@@ -4847,9 +4848,7 @@ def main():
             print("  [R] Read Proximity Values       (ReadProximity - Continuous, ESC to stop)")
             print("  [6] Arduino Hardware DAC Test   (setDAC X)            [Auto-Bridge]")
             print("  [C] Clear OLED Display          (ClearDisp)")
-            print("  [K] QMC5883L Compass Test       (Rotate > 45 deg Verification)")
             print("  [Q] Read Compass Values         (GetCompass)")
-            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [J] RFdropBlink Link-Loss Test  (Garage Pin 18 LED: 4 Hz Flash on Disconnect)")
             print("  [Y] Cytron Motor RF-Loss Test   (100% Power -> Pull Coord Power -> Gentle Stop -> Reconnect)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
@@ -4859,7 +4858,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -4909,8 +4908,6 @@ def main():
                 run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
                 clear_display(client, target=args.target)
-            elif choice in ("K", "COMPASS", "QMC5883L"):
-                run_compass_test(client, target=args.target, addr=args.compass_addr)
             elif choice in ("F", "MAG", "COMPASSMAG", "COMPASSHYST"):
                 run_compass_hysteresis_test(client, target=args.target, addr=args.compass_addr, low_mag=args.low_mag, high_mag=args.high_mag)
             elif choice in ("Q", "GETCOMPASS", "READCOMPASS"):

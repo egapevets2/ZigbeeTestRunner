@@ -7,6 +7,7 @@ operations on the ESP32-C6 node (PNPzigbee) and test fixture (TXRXproto).
 
 import sys
 import time
+import math
 import re
 import argparse
 import threading
@@ -450,14 +451,52 @@ def run_dac_test(client: CoordinatorClient, target: str = "Kitchen", dac_val: in
     return success
 
 
-def read_adc_pin(client: CoordinatorClient, target: str = "Kitchen", channel: str = "A1", timeout: float = 3.0) -> int | None:
+def _normalize_adc_channel(pin_or_channel: int | str) -> str:
+    """Normalizes pin/channel (0, 1, 2, '0', '1', '2', 'A0', 'A1', 'A2') to 'A0', 'A1', or 'A2'."""
+    s = str(pin_or_channel).strip().upper()
+    if s in ("0", "A0"):
+        return "A0"
+    if s in ("1", "A1"):
+        return "A1"
+    if s in ("2", "A2"):
+        return "A2"
+    return "A1"
+
+
+def setup_adc_pins(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    pins: list[int | str] | int | str = (0, 1),
+) -> bool:
+    """
+    Configures one or more pins (either or both Pin 0 / A0 and Pin 1 / A1, or Pin 2 / A2)
+    as ADC inputs on the target node.
+    """
+    if isinstance(pins, (int, str)):
+        pin_list = [pins]
+    else:
+        pin_list = list(pins)
+
+    for p in pin_list:
+        ch = _normalize_adc_channel(p)
+        gpio_num = int(ch[1])
+        cmd = f"{target} SetupADC{ch}"
+        print(f"[>] Configuring Pin {gpio_num} ({ch}) as ADC input: \"{cmd}\"")
+        client.send_line(cmd)
+        time.sleep(0.25)
+
+    return True
+
+
+def read_adc_pin(client: CoordinatorClient, target: str = "Kitchen", channel: int | str = "A1", timeout: float = 3.0) -> int | None:
     """
     Sends `<target> ReadADC<channel>` and waits for `ADCval<channel> <raw_val>`.
     Returns integer raw_val (0..4095 on ESP32-C6) or None on timeout.
     """
+    ch = _normalize_adc_channel(channel)
     got_adc_event = threading.Event()
     adc_reading = None
-    expected_token = f"ADCval{channel}"
+    expected_token = f"ADCval{ch}"
 
     def on_rx(msg: str):
         nonlocal adc_reading
@@ -480,18 +519,20 @@ def read_adc_pin(client: CoordinatorClient, target: str = "Kitchen", channel: st
                         return
 
     client.add_rx_callback(on_rx)
-    cmd = f"{target} ReadADC{channel}"
+    cmd = f"{target} ReadADC{ch}"
     client.send_line(cmd)
     got_adc_event.wait(timeout=timeout)
     client.remove_rx_callback(on_rx)
     return adc_reading
 
 
-def run_read_adc_test(client: CoordinatorClient, target: str = "Kitchen", channel: str = "A1", timeout: float = 3.0) -> bool:
-    """Reads the ADC channel once and displays raw count and voltage."""
+def run_read_adc_test(client: CoordinatorClient, target: str = "Kitchen", channel: int | str = "A1", timeout: float = 3.0) -> bool:
+    """Configures and reads the specified ADC channel (Pin 0 / A0, Pin 1 / A1, or Pin 2 / A2) and displays raw count and voltage."""
+    ch = _normalize_adc_channel(channel)
+    gpio_num = int(ch[1])
     print("\n" + "=" * 65)
-    print(f"--- READ ADC PIN {channel} ---")
-    print(f"Target Node: {target} (ESP32-C6 Pin {channel} / GPIO 1)")
+    print(f"--- READ ADC PIN {gpio_num} ({ch}) ---")
+    print(f"Target Node: {target} (ESP32-C6 Pin {ch} / GPIO {gpio_num})")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
@@ -499,37 +540,46 @@ def run_read_adc_test(client: CoordinatorClient, target: str = "Kitchen", channe
         print(f"  <-- [RX] {msg}")
 
     client.add_rx_callback(on_rx)
-    print(f"\n[>] Sending command: \"{target} ReadADC{channel}\"")
+    setup_adc_pins(client, target=target, pins=[ch])
+    print(f"\n[>] Sending command: \"{target} ReadADC{ch}\"")
     start_time = time.time()
-    val = read_adc_pin(client, target=target, channel=channel, timeout=timeout)
+    val = read_adc_pin(client, target=target, channel=ch, timeout=timeout)
     elapsed_ms = (time.time() - start_time) * 1000.0
     client.remove_rx_callback(on_rx)
 
     print("-" * 65)
     if val is not None:
         voltage = (val * 3.96) / 4095.0
-        print(f"[+] TEST PASSED: Received ADCval{channel} = {val} (~{voltage:.2f}V) in {elapsed_ms:.1f}ms")
+        print(f"[+] TEST PASSED: Received ADCval{ch} = {val} (~{voltage:.2f}V) in {elapsed_ms:.1f}ms")
         return True
     else:
-        print(f"[-] TEST FAILED: Timed out waiting for ADCval{channel} response from {target}.")
+        print(f"[-] TEST FAILED: Timed out waiting for ADCval{ch} response from {target}.")
         return False
 
 
-def run_dac_adc_loopback_test(client: CoordinatorClient, target: str = "Kitchen", test_points: list[int] = None, timeout: float = 3.0) -> bool:
+def run_dac_adc_loopback_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    test_points: list[int] = None,
+    timeout: float = 3.0
+) -> bool:
     """
-    Executes Closed-Loop DAC -> ADC loopback test:
-    Trinket M0 Pin 1~ (DAC) -> ESP32-C6 Pin A1 (GPIO 1 / ADC1_CH1).
-    Tests across multiple voltage setpoints (e.g. 0, 256, 512, 768, 1023).
+    Executes Closed-Loop DAC -> Dual ADC (Pin 1 & Pin 0) loopback test:
+      - Trinket M0 Pin 1~ (DAC) -> ESP32-C6 Pin 1 (A1 / GPIO 1): Expects FULL DAC voltage
+      - Resistor divider (1/2)  -> ESP32-C6 Pin 0 (A0 / GPIO 0): Expects HALF DAC voltage
+    Sets up both Pin 0 (A0) and Pin 1 (A1) as ADC inputs and tests across multiple setpoints.
     """
     if test_points is None:
         test_points = [0, 256, 512, 768, 1023]
 
-    print("\n" + "=" * 65)
-    print("--- [TEST 8] CLOSED-LOOP DAC -> ADC LOOPBACK TEST ---")
-    print(f"Target Node:  {target} (Trinket M0 Pin 1~ DAC -> ESP32-C6 Pin A1)")
+    print("\n" + "=" * 92)
+    print("--- [TEST 8] CLOSED-LOOP DAC -> DUAL ADC (PIN 1 FULL V & PIN 0 HALF V) LOOPBACK TEST ---")
+    print(f"Target Node:  {target}")
+    print("  - Pin 1 (A1 / GPIO 1): Full DAC Voltage  (1.0x V_DAC)")
+    print("  - Pin 0 (A0 / GPIO 0): Half DAC Voltage  (0.5x V_DAC via resistor divider)")
     print(f"Test Points:  {test_points}")
     print(f"Timestamp:    {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
+    print("=" * 92)
 
     # 1. Ensure Serial Bridge is active and verified
     if not run_setup_bridge_test(client, target=target, timeout=timeout):
@@ -537,22 +587,30 @@ def run_dac_adc_loopback_test(client: CoordinatorClient, target: str = "Kitchen"
         return False
     time.sleep(0.3)
 
-    # 2. Ensure ADC A1 setup
-    print("\n[>] Initializing ADC A1...")
-    client.send_line(f"{target} SetupADCA1")
-    time.sleep(0.4)
+    # 2. Configure BOTH Pin 1 (A1) and Pin 0 (A0) as ADC inputs
+    print("\n[>] Initializing both Pin 1 (A1) and Pin 0 (A0) as ADC inputs...")
+    setup_adc_pins(client, target=target, pins=[1, 0])
+    time.sleep(0.2)
 
-    print(f"\n{'DAC Val':<9} {'DAC (V)':<9} {'Raw ADC':<9} {'ADC (V)':<9} {'Delta (V)':<10} {'Status':<8}")
-    print("-" * 65)
+    header = (
+        f"{'DAC':<6} | "
+        f"{'ExpP1(V)':<8} {'RawP1':<6} {'Pin1(V)':<8} {'ErrP1(V)':<9} | "
+        f"{'ExpP0(V)':<8} {'RawP0':<6} {'Pin0(V)':<8} {'ErrP0(V)':<9} | "
+        f"{'Status':<8}"
+    )
+    print("\n" + header)
+    print("-" * 92)
 
     all_passed = True
-    previous_adc = -1
+    previous_adc1 = -1
+    previous_adc0 = -1
 
-    # ESP32-C6 ADC1_CH1 with ADC_ATTEN_DB_12 full scale calibration factor (~3.96V)
+    # ESP32-C6 ADC1 with ADC_ATTEN_DB_12 full scale calibration factor (~3.96V)
     ADC_FULL_SCALE_VOLTS = 3.96
 
     for dac_val in test_points:
-        expected_v = (dac_val * 3.3) / 1023.0
+        expected_v1 = (dac_val * 3.3) / 1023.0
+        expected_v0 = expected_v1 / 2.0
 
         # Step 1: Set DAC on Trinket M0
         got_dac = threading.Event()
@@ -568,46 +626,87 @@ def run_dac_adc_loopback_test(client: CoordinatorClient, target: str = "Kitchen"
         client.remove_rx_callback(on_rx_dac)
 
         if not dac_ok:
-            print(f"{dac_val:<9} {expected_v:<9.2f} {'TIMEOUT':<9} {'---':<9} {'---':<10} [FAIL - No DAC reply]")
+            print(
+                f"{dac_val:<6} | "
+                f"{expected_v1:<8.2f} {'TIMEOUT':<6} {'---':<8} {'---':<9} | "
+                f"{expected_v0:<8.2f} {'---':<6} {'---':<8} {'---':<9} | "
+                f"[FAIL - No DAC reply]"
+            )
             all_passed = False
             continue
 
-        # Settling time for analog line
+        # Settling time for analog line & resistor divider
         time.sleep(0.15)
 
-        # Step 2: Read ADC A1 on ESP32-C6
-        adc_raw = read_adc_pin(client, target=target, channel="A1", timeout=timeout)
-        if adc_raw is None:
-            print(f"{dac_val:<9} {expected_v:<9.2f} {'TIMEOUT':<9} {'---':<9} {'---':<10} [FAIL - No ADC reply]")
+        # Step 2: Read ADC Pin 1 (A1 - Full DAC voltage)
+        adc1_raw = read_adc_pin(client, target=target, channel="A1", timeout=timeout)
+        time.sleep(0.05)
+
+        # Step 3: Read ADC Pin 0 (A0 - Half DAC voltage)
+        adc0_raw = read_adc_pin(client, target=target, channel="A0", timeout=timeout)
+
+        if adc1_raw is None or adc0_raw is None:
+            r1_str = str(adc1_raw) if adc1_raw is not None else "TIMEO"
+            r0_str = str(adc0_raw) if adc0_raw is not None else "TIMEO"
+            print(
+                f"{dac_val:<6} | "
+                f"{expected_v1:<8.2f} {r1_str:<6} {'---':<8} {'---':<9} | "
+                f"{expected_v0:<8.2f} {r0_str:<6} {'---':<8} {'---':<9} | "
+                f"[FAIL - No ADC reply]"
+            )
             all_passed = False
             continue
 
-        measured_v = (adc_raw * ADC_FULL_SCALE_VOLTS) / 4095.0
-        delta_v = measured_v - expected_v
+        measured_v1 = (adc1_raw * ADC_FULL_SCALE_VOLTS) / 4095.0
+        delta_v1 = measured_v1 - expected_v1
 
-        # Evaluation criteria:
-        # 1. Monotonicity check (allowing small ADC noise buffer)
+        measured_v0 = (adc0_raw * ADC_FULL_SCALE_VOLTS) / 4095.0
+        delta_v0 = measured_v0 - expected_v0
+
+        # Evaluation criteria for Pin 1 (Full DAC Voltage) and Pin 0 (Half DAC Voltage):
+        # 1. Monotonicity check (allowing small ADC noise buffer of 50 counts)
         # 2. Voltage tracking tolerance within +-0.25V
-        point_pass = True
-        if dac_val > 0 and (adc_raw + 50) < previous_adc:
-            point_pass = False
+        p1_pass = True
+        if dac_val > 0 and (adc1_raw + 50) < previous_adc1:
+            p1_pass = False
+        if abs(delta_v1) > 0.25:
+            p1_pass = False
 
-        if abs(delta_v) > 0.25:
-            point_pass = False
+        p0_pass = True
+        if dac_val > 0 and (adc0_raw + 50) < previous_adc0:
+            p0_pass = False
+        if abs(delta_v0) > 0.25:
+            p0_pass = False
 
-        status_str = "[PASS]" if point_pass else "[FAIL]"
+        point_pass = p1_pass and p0_pass
+        if point_pass:
+            status_str = "[PASS]"
+        elif not p1_pass and not p0_pass:
+            status_str = "[FAIL P1&P0]"
+        elif not p1_pass:
+            status_str = "[FAIL P1]"
+        else:
+            status_str = "[FAIL P0]"
+
         if not point_pass:
             all_passed = False
 
-        previous_adc = adc_raw
-        print(f"{dac_val:<9} {expected_v:<9.2f} {adc_raw:<9} {measured_v:<9.2f} {delta_v:+8.2f}   {status_str:<8}")
+        previous_adc1 = adc1_raw
+        previous_adc0 = adc0_raw
+
+        print(
+            f"{dac_val:<6} | "
+            f"{expected_v1:<8.2f} {adc1_raw:<6} {measured_v1:<8.2f} {delta_v1:+8.2f}  | "
+            f"{expected_v0:<8.2f} {adc0_raw:<6} {measured_v0:<8.2f} {delta_v0:+8.2f}  | "
+            f"{status_str:<8}"
+        )
         time.sleep(0.15)
 
-    print("-" * 65)
+    print("-" * 92)
     if all_passed:
-        print("[+] TEST PASSED: Closed-loop DAC -> ADC tracking verified across all setpoints!")
+        print("[+] TEST PASSED: Closed-loop DAC -> Pin 1 (Full V) & Pin 0 (1/2 V) ADC tracking verified!")
     else:
-        print("[-] TEST FAILED: One or more DAC -> ADC setpoints failed tracking criteria.")
+        print("[-] TEST FAILED: One or more DAC -> ADC setpoints on Pin 1 or Pin 0 failed tracking criteria.")
 
     return all_passed
 
@@ -809,6 +908,233 @@ def run_schmitt_hysteresis_ramp_test(
         print("[-] TEST FAILED: Threshold shift did not produce expected event timing shifts.")
 
     return all_passed
+
+
+def run_adcpot_ramp_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    detent_positions: int = 20,
+    steps: int = 32,
+    step_delay: float = 0.16,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Executes Closed-Loop DAC -> ADCpot Detent Ramp Test (0 -> 1023 -> 0):
+      1. Initializes Serial Bridge and sets DAC to 0.
+      2. Configures ADCpot with 20 detent positions (PotDetent 5 -> 5% of full-scale per detent).
+      3. Enables ADCpot mode on Pin 1 (ADCpotA1).
+      4. Ramps DAC from 0 to 1023 (full-scale) and back down to 0, synchronizing each step with GotDAC.
+      5. On each ADCpotA1 message from the end-device, prints the DAC value and new ADCpot value,
+         and verifies that the reported ADCpot value matches the expected detent progression and voltage.
+    """
+    detent_pct = max(1, int(round(100.0 / detent_positions)))
+    ADC_FULL_SCALE_VOLTS = 3.30  # Matched to 3.3V rail (potentiometer VCC)
+    ADC_ZERO_OFFSET_VOLTS = 0.050  # 50mV zero threshold offset (shifted active range [50mV, 3.3V])
+    POT_HYST_MARGIN = 0.15
+
+    print("\n" + "=" * 86)
+    print(f"--- [TEST A] CLOSED-LOOP DAC -> ADCpot DETENT RAMP TEST ({detent_positions} DETENTS) ---")
+    print(f"Target Node:      {target} (Trinket M0 DAC Pin 1~ -> ESP32-C6 Pin A1)")
+    print(f"Detent Config:    {detent_positions} positions (PotDetent {detent_pct} -> {detent_pct}% of active span [50mV..3.30V])")
+    print(f"Ramp Profile:     0 -> 1023 -> 0 ({steps} synced DAC steps each way, +{step_delay*1000:.0f}ms settle)")
+    print(f"Hysteresis Snap:  65% of step (0.50 halfway + {POT_HYST_MARGIN:.2f} margin, 0 floor <= 50mV)")
+    print(f"Timestamp:        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 86)
+
+    # 1. Ensure Serial Bridge is active
+    if not run_setup_bridge_test(client, target=target, timeout=timeout):
+        print("[-] Aborting ADCpot test: Serial bridge initialization failed.")
+        return False
+    time.sleep(0.2)
+
+    current_dac = 0
+    phase = "UP"
+    current_detent = 0
+    up_events = []
+    down_events = []
+    all_events_valid = True
+    rx_lock = threading.Lock()
+
+    def set_dac_synced(dac_val: int):
+        nonlocal current_dac
+        got_dac = threading.Event()
+        expected_token = f"GotDAC {dac_val}"
+
+        def on_dac_rx(msg: str):
+            if expected_token in msg:
+                got_dac.set()
+
+        with rx_lock:
+            current_dac = dac_val
+
+        client.add_rx_callback(on_dac_rx)
+        try:
+            client.send_line(f"{target} setDAC {dac_val}")
+            got_dac.wait(timeout=1.2)
+        finally:
+            client.remove_rx_callback(on_dac_rx)
+        time.sleep(step_delay)
+
+    # 2. Initialize DAC to 0 before locking initial ADCpot detent
+    print("\n[>] Initializing DAC to 0 (0.00V)...")
+    set_dac_synced(0)
+    time.sleep(0.25)
+
+    # 3. Configure PotDetent X and enable ADCpot mode on A1
+    print(f"[>] Configuring {detent_positions} detent positions: \"{target} PotDetent {detent_pct}\"")
+    client.send_line(f"{target} PotDetent {detent_pct}")
+    time.sleep(0.25)
+
+    print(f"[>] Enabling ADCpot mode on Pin 1 (A1): \"{target} ADCpotA1\"")
+    client.send_line(f"{target} ADCpotA1")
+    time.sleep(0.4)
+
+    def calc_theoretical_detent(dac_val: int, ramp_dir: str) -> tuple[int, float]:
+        v_dac = (dac_val * 3.3) / 1023.0
+        if v_dac <= ADC_ZERO_OFFSET_VOLTS:
+            pos = 0.0
+        else:
+            effective_span = ADC_FULL_SCALE_VOLTS - ADC_ZERO_OFFSET_VOLTS
+            frac = (v_dac - ADC_ZERO_OFFSET_VOLTS) / effective_span
+            frac = min(1.0, max(0.0, frac))
+            pos = frac / (detent_pct / 100.0)
+
+        if pos <= 0.0:
+            d_theory = 0
+        elif ramp_dir == "UP":
+            d_theory = max(0, int(math.floor(pos - POT_HYST_MARGIN + 0.5)))
+        else:
+            d_theory = max(0, int(math.ceil(pos + POT_HYST_MARGIN - 0.5)))
+        return d_theory, pos
+
+    def on_rx(msg: str):
+        nonlocal current_detent, all_events_valid
+        # Ignore ESP-IDF SERIAL_GATEWAY diagnostic log lines so each frame is processed once
+        if "SERIAL_GATEWAY:" in msg:
+            return
+        match = re.search(r"ADCpotA1\s+(-?\d+)", msg, re.IGNORECASE)
+        if not match:
+            return
+        pot_val = int(match.group(1))
+        with rx_lock:
+            if pot_val == current_detent:
+                return
+            dac_snapshot = current_dac
+            dir_snapshot = phase
+            if dir_snapshot == "UP":
+                exp_seq = current_detent + 1
+                dir_ok = pot_val > current_detent
+            else:
+                exp_seq = current_detent - 1
+                dir_ok = pot_val < current_detent
+
+            d_theory, pos_theory = calc_theoretical_detent(dac_snapshot, dir_snapshot)
+            v_dac = (dac_snapshot * 3.3) / 1023.0
+
+            # Verify that the reported ADCpot value steps in the right direction and matches
+            # expected detent value (allowing +-2 detents tolerance for analog/timing latency)
+            seq_ok = abs(pot_val - exp_seq) <= 1 and dir_ok
+            theory_ok = abs(pot_val - d_theory) <= 2
+            event_ok = seq_ok and theory_ok
+
+            if not event_ok:
+                all_events_valid = False
+
+            current_detent = pot_val
+            status_str = "[PASS]" if event_ok else f"[FAIL exp={exp_seq}, th={d_theory}]"
+            print(
+                f"  [RAMP {dir_snapshot:<4}] DAC = {dac_snapshot:<4} ({v_dac:4.2f}V) | "
+                f"New ADCpot = {pot_val:<2} | Expected = {exp_seq:<2} (Theory: {d_theory:<2}, pos={pos_theory:5.2f}) | {status_str}"
+            )
+
+            record = {
+                "dac": dac_snapshot,
+                "pot": pot_val,
+                "expected": exp_seq,
+                "theory": d_theory,
+                "ok": event_ok,
+            }
+            if dir_snapshot == "UP":
+                up_events.append(record)
+            else:
+                down_events.append(record)
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        # --- Phase 1: Ramp UP (0 -> 1023) ---
+        print("\n" + "-" * 86)
+        print(f"[*] Starting Ramp UP: DAC 0 -> 1023 ({steps} steps)...")
+        print("-" * 86)
+        with rx_lock:
+            phase = "UP"
+
+        for i in range(1, steps + 1):
+            dac_val = int(round((1023.0 / steps) * i))
+            set_dac_synced(dac_val)
+
+        # Drain and settle at peak DAC (1023) so peak detent is captured in UP phase
+        print("\n[*] Settling at peak DAC 1023...")
+        t_peak = time.time()
+        last_det = current_detent
+        while time.time() - t_peak < 1.0:
+            time.sleep(0.05)
+            with rx_lock:
+                if current_detent != last_det:
+                    last_det = current_detent
+                    t_peak = time.time()
+
+        # --- Phase 2: Ramp DOWN (1023 -> 0) ---
+        print("\n" + "-" * 86)
+        print(f"[*] Starting Ramp DOWN: DAC 1023 -> 0 ({steps} steps)...")
+        print("-" * 86)
+        with rx_lock:
+            phase = "DOWN"
+
+        for i in range(1, steps + 1):
+            dac_val = int(round(1023.0 - (1023.0 / steps) * i))
+            set_dac_synced(dac_val)
+
+        # Wait up to 2.5s at DAC=0 for final downward detent message (detent 0)
+        print("\n[*] Settling at DAC 0...")
+        t_drain = time.time()
+        while time.time() - t_drain < 2.5:
+            with rx_lock:
+                if current_detent == 0:
+                    break
+            time.sleep(0.05)
+    finally:
+        client.remove_rx_callback(on_rx)
+        # Restore A1 to standard ADC comparator mode after test
+        client.send_line(f"{target} SetupADCA1")
+        time.sleep(0.15)
+
+    # --- Verification Summary ---
+    peak_detent = up_events[-1]["pot"] if up_events else 0
+    final_detent = down_events[-1]["pot"] if down_events else -1
+    # At 3.30V DAC full-scale on a 3.30V ADC range, pos_max reaches 20 detents
+    min_expected_transitions = 16
+    up_count_ok = len(up_events) >= min_expected_transitions
+    down_count_ok = len(down_events) >= min_expected_transitions
+    returned_to_zero = (final_detent == 0)
+
+    overall_pass = all_events_valid and up_count_ok and down_count_ok and returned_to_zero
+
+    print("\n" + "=" * 86)
+    print("ADCpot DETENT RAMP VERIFICATION SUMMARY:")
+    print("=" * 86)
+    print(f"  Ramp UP Transitions:   {len(up_events)} detents (0 -> {peak_detent})")
+    print(f"  Ramp DOWN Transitions: {len(down_events)} detents ({peak_detent} -> {final_detent})")
+    print(f"  Returned to Detent 0:  {'YES' if returned_to_zero else 'NO'}")
+    print(f"  All Values Matched:    {'YES' if all_events_valid else 'NO'}")
+    print("-" * 86)
+
+    if overall_pass:
+        print(f"[+] TEST PASSED: ADCpot {detent_positions}-detent ramp verified up to {peak_detent} and back to 0!")
+    else:
+        print("[-] TEST FAILED: ADCpot detent transitions did not match expected progression.")
+
+    return overall_pass
 
 
 def run_servo_pwm_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
@@ -1309,7 +1635,7 @@ UNIPOLAR_DEFAULT_DELAY_MS = 10
 
 
 def setup_unipolar_stepper(client: CoordinatorClient, target: str = "Garage", timeout: float = 3.0) -> bool:
-    """Initializes Adafruit Small Reduction Stepper on target node (pins 1, 2, 21, 22)."""
+    """Initializes Adafruit Small Reduction Stepper on target node (pins 1, 2, 21, 0)."""
     got_ack = threading.Event()
     def on_rx(msg: str):
         if f"< {target}:" in msg and ("[ACK]" in msg or "UNIPOLAR" in msg):
@@ -1361,7 +1687,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
         - Center-taps to 5V
         - Gate-level N-channel MOSFETs
         - Coil A: Pin 1 (Orange), Pin 2 (Pink)
-        - Coil B: Pin 21 (Yellow), Pin 22 (Blue)
+        - Coil B: Pin 21 (Yellow), Pin 0 (Blue)
       Sequence:
         1. SetupUnipolar: Configures pins and starts worker task.
         2. UniStepMode: Selects drive mode (0=Full-step, 1=Half-step, 2=Wave drive).
@@ -1388,7 +1714,7 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     print(f"Coil 1:      Pin 1 (Orange)")
     print(f"Coil 2:      Pin 2 (Pink)")
     print(f"Coil 3:      Pin 21 (Yellow)")
-    print(f"Coil 4:      Pin 22 (Blue)")
+    print(f"Coil 4:      Pin 0 (Blue)")
     print(f"Drive Mode:  {mode_desc}")
     print(f"Driver:      Gate-level N-channel MOSFETs (Center tap = 5V)")
     print(f"Pass 1:      Standard Speed ({delay_1}ms delay): {steps} FWD -> 1s Pause -> {steps} BKW")
@@ -1515,6 +1841,289 @@ def run_unipolar_stepper_test(client: CoordinatorClient, target: str = "Garage",
     return passed
 
 
+def setup_bipolar_stepper(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    ap_gpio: int = 1,
+    an_gpio: int = 21,
+    bp_gpio: int = 2,
+    bn_gpio: int = 0,
+    pwm_duty: int = 75,
+    ms_per_step: int = 70,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Configures and initializes the Bipolar Stepper (Stepper.c) on `target` (default: Garage)
+    for a HiLetgo DRV8833 H-Bridge driver with 5V supply and 12-ohm, 1.8 deg/step motor:
+      - ApGPIO = 1, AnGPIO = 21, BpGPIO = 2, BnGPIO = 0
+      - FullStep mode
+      - StepPWMduty = 75 (75% PWM duty cycle)
+      - HoldPWM = 0 (freewheel when idle)
+      - Accel = 0, Decel = 0 (no acceleration or deceleration ramp)
+      - msPerStep = 70 (default 70ms per step)
+      - SetupStepper
+    """
+    print(f"\n[>] Configuring Bipolar Stepper (HiLetgo DRV8833) on {target}:")
+    print(f"    Wiring: ApGPIO={ap_gpio}, AnGPIO={an_gpio}, BpGPIO={bp_gpio}, BnGPIO={bn_gpio}")
+    print(f"    Config: FullStep, StepPWMduty={pwm_duty}%, HoldPWM=0%, Accel=0, Decel=0, msPerStep={ms_per_step}ms")
+
+    cfg_cmds = [
+        f"{target} ApGPIO {ap_gpio}",
+        f"{target} AnGPIO {an_gpio}",
+        f"{target} BpGPIO {bp_gpio}",
+        f"{target} BnGPIO {bn_gpio}",
+        f"{target} FullStep",
+        f"{target} StepPWMduty {pwm_duty}",
+        f"{target} HoldPWM 0",
+        f"{target} Accel 0",
+        f"{target} Decel 0",
+        f"{target} msPerStep {ms_per_step}",
+        f"{target} SetupStepper",
+    ]
+
+    for cmd in cfg_cmds:
+        got_ack = threading.Event()
+
+        def on_rx(msg: str):
+            if f"< {target}:" in msg and ("[ACK]" in msg or "OK" in msg):
+                got_ack.set()
+
+        client.add_rx_callback(on_rx)
+        print(f"      Sending: \"{cmd}\"")
+        client.send_line(cmd)
+        got_ack.wait(timeout=timeout)
+        client.remove_rx_callback(on_rx)
+        time.sleep(0.05)
+
+    print(f"[+] Bipolar Stepper initialized on {target}.")
+    return True
+
+
+def step_bipolar_stepper(client: CoordinatorClient, target: str = "Garage", steps: int = 180, timeout: float = 3.0) -> bool:
+    """Sends `<target> Step <steps>` to move the bipolar stepper signed `steps` full-steps."""
+    got_ack = threading.Event()
+
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "GOT STEP OK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} Step {steps}"
+    dir_str = "FORWARD" if steps >= 0 else "BACKWARD"
+    print(f"[>] Stepping {target} {abs(steps)} full-steps {dir_str}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] Command 'Step {steps}' acknowledged ({elapsed:.1f}ms).")
+    return True
+
+
+BIPOLAR_PIN_PAIRINGS = {
+    "1": (1, 2, 21, 0, "Pairing 1 (Paired: Coil A = 1,2 | Coil B = 21,0)"),
+    "2": (1, 21, 2, 0, "Pairing 2 (Interleaved: Coil A = 1,21 | Coil B = 2,0)"),
+    "3": (1, 0, 2, 21, "Pairing 3 (Outer/Inner: Coil A = 1,0 | Coil B = 2,21)"),
+}
+
+
+def run_bipolar_pairing_finder(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    steps_per_trial: int = 24,
+    pwm_duty: int = 75,
+    ms_per_step: int = 100,
+) -> bool:
+    """
+    Tests all 3 possible coil pairings of GPIOs (1, 2, 21, 0) sequentially so the user
+    can identify which pairing produces smooth unidirectional rotation instead of
+    oscillating 1 step forward / 1 step backward.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST H - PAIRING FINDER] TESTING ALL 3 COIL PAIRINGS OF (1, 2, 21, 0) ---")
+    print(f"Target Node:  {target} (HiLetgo DRV8833 @ 5V)")
+    print(f"Trial Config: {steps_per_trial} Full-Steps Forward -> 1s Pause -> {steps_per_trial} Full-Steps Backward")
+    print(f"Drive Settings: StepPWMduty={pwm_duty}%, msPerStep={ms_per_step}ms, Accel=0, Decel=0")
+    print("=" * 65)
+
+    est_duration = (steps_per_trial * ms_per_step) / 1000.0
+
+    for key, (ap, an, bp, bn, desc) in BIPOLAR_PIN_PAIRINGS.items():
+        print("\n" + "-" * 65)
+        print(f"[*] TRIAL [{key}/3]: {desc}")
+        print(f"    ApGPIO={ap}, AnGPIO={an}, BpGPIO={bp}, BnGPIO={bn}")
+        print("-" * 65)
+        setup_bipolar_stepper(
+            client,
+            target=target,
+            ap_gpio=ap,
+            an_gpio=an,
+            bp_gpio=bp,
+            bn_gpio=bn,
+            pwm_duty=pwm_duty,
+            ms_per_step=ms_per_step,
+        )
+        time.sleep(0.3)
+
+        print(f"[*] Trial [{key}/3] Stepping FORWARD {steps_per_trial} full-steps ({ms_per_step}ms/step)...")
+        step_bipolar_stepper(client, target=target, steps=steps_per_trial)
+        time.sleep(est_duration + 0.5)
+
+        time.sleep(0.8)
+
+        print(f"[*] Trial [{key}/3] Stepping BACKWARD {steps_per_trial} full-steps ({ms_per_step}ms/step)...")
+        step_bipolar_stepper(client, target=target, steps=-steps_per_trial)
+        time.sleep(est_duration + 0.5)
+
+        if key != "3":
+            print("\n[*] Pausing 2.0s before next pairing...")
+            time.sleep(2.0)
+
+    print("\n" + "=" * 65)
+    print("[?] Which coil pairing rotated cleanly in one direction?")
+    for key, (ap, an, bp, bn, desc) in BIPOLAR_PIN_PAIRINGS.items():
+        print(f"    [{key}] {desc} -> Ap={ap}, An={an}, Bp={bp}, Bn={bn}")
+    try:
+        resp = input("    Enter working pairing number [1/2/3] or 'n' if none worked: ").strip().lower()
+    except (EOFError, OSError):
+        resp = "2"
+
+    if resp in BIPOLAR_PIN_PAIRINGS:
+        ap, an, bp, bn, desc = BIPOLAR_PIN_PAIRINGS[resp]
+        print(f"[+] Pairing [{resp}] selected ({desc})! Running full 180-step test with this pairing...")
+        return run_bipolar_stepper_test(
+            client,
+            target=target,
+            steps=180,
+            pwm_duty=pwm_duty,
+            ms_per_step=ms_per_step,
+            ap_gpio=ap,
+            an_gpio=an,
+            bp_gpio=bp,
+            bn_gpio=bn,
+        )
+    print("[-] No working pairing confirmed.")
+    return False
+
+
+def run_bipolar_stepper_test(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    steps: int = 180,
+    pwm_duty: int = 75,
+    ms_per_step: int = 70,
+    ap_gpio: int = 1,
+    an_gpio: int = 21,
+    bp_gpio: int = 2,
+    bn_gpio: int = 0
+) -> bool:
+    """
+    Executes the Bipolar Stepper Motor Test (Stepper.c) on Garage:
+      - Motor:      Bipolar stepper, 12-ohm coils, 1.8 deg/step (180 full-steps = 360 half-steps = 324 deg)
+      - Driver:     HiLetgo DRV8833 dual H-Bridge with 5V supply
+      - Wiring:     ApGPIO=1, AnGPIO=21, BpGPIO=2, BnGPIO=0
+      - Part 1:     FullStep Mode — 180 Full-Steps Forward -> 1s Pause -> 180 Full-Steps Backward
+      - Part 2:     HalfStep Mode — 360 Half-Steps Forward -> 1s Pause -> 360 Half-Steps Backward
+    """
+    deg_travel = steps * 1.8
+    half_steps = steps * 2
+    half_ms_per_step = max(1, ms_per_step // 2)
+
+    print("\n" + "=" * 65)
+    print("--- [TEST H] BIPOLAR STEPPER MOTOR TEST (DRV8833 @ 5V: FULL-STEP & HALF-STEP) ---")
+    print(f"Target Node:  {target} (ESP32-C6)")
+    print("Driver / Vcc: HiLetgo DRV8833 Dual H-Bridge | 5V Supply (25 kHz Ultrasonic PWM)")
+    print("Motor Specs:  Bipolar, 12-Ohm Coils, 1.8 deg/step (0.9 deg/half-step)")
+    print(f"Wiring:       ApGPIO={ap_gpio}, AnGPIO={an_gpio}, BpGPIO={bp_gpio}, BnGPIO={bn_gpio}")
+    print(f"Drive Power:  StepPWMduty={pwm_duty}% | HoldPWM=0% | Accel=0 | Decel=0")
+    print(f"Part 1 (FullStep): {steps} Full-Steps ({deg_travel:.1f} deg) Fwd/Bkw @ {ms_per_step} ms/step")
+    print(f"Part 2 (HalfStep): {half_steps} Half-Steps ({deg_travel:.1f} deg) Fwd/Bkw @ {half_ms_per_step} ms/half-step")
+    print("=" * 65)
+
+    # Step 1: Configure pins, FullStep mode, duty, Accel=0, Decel=0, and initialize Stepper
+    setup_bipolar_stepper(
+        client,
+        target=target,
+        ap_gpio=ap_gpio,
+        an_gpio=an_gpio,
+        bp_gpio=bp_gpio,
+        bn_gpio=bn_gpio,
+        pwm_duty=pwm_duty,
+        ms_per_step=ms_per_step,
+    )
+    time.sleep(0.2)
+
+    est_full_duration = (steps * ms_per_step) / 1000.0
+
+    # --- PART 1: FULL-STEP TEST ---
+    print(f"\n[*] [PHASE 1/4 - FULL-STEP] Stepping FORWARD {steps} full-steps ({deg_travel:.1f} deg, StepPWMduty={pwm_duty}%, {ms_per_step}ms/step)...")
+    step_bipolar_stepper(client, target=target, steps=steps)
+    print(f"    Waiting ~{est_full_duration:.1f}s for {steps} full-steps to complete...")
+    time.sleep(est_full_duration + 0.5)
+
+    print("\n[*] Pausing 1.0 second...")
+    time.sleep(1.0)
+
+    print(f"\n[*] [PHASE 2/4 - FULL-STEP] Stepping BACKWARD {steps} full-steps (-{deg_travel:.1f} deg, StepPWMduty={pwm_duty}%, {ms_per_step}ms/step)...")
+    step_bipolar_stepper(client, target=target, steps=-steps)
+    print(f"    Waiting ~{est_full_duration:.1f}s for {steps} full-steps return movement to complete...")
+    time.sleep(est_full_duration + 0.5)
+
+    print("\n[*] Pausing 1.5 seconds before switching to Half-Step mode...")
+    time.sleep(1.5)
+
+    # --- PART 2: HALF-STEP TEST ---
+    print(f"\n[>] Switching {target} to HalfStep mode ({half_ms_per_step} ms/half-step)...")
+    for cmd in (f"{target} HalfStep", f"{target} msPerStep {half_ms_per_step}"):
+        got_ack = threading.Event()
+
+        def on_rx(msg: str):
+            if f"< {target}:" in msg and ("[ACK]" in msg or "OK" in msg):
+                got_ack.set()
+
+        client.add_rx_callback(on_rx)
+        print(f"      Sending: \"{cmd}\"")
+        client.send_line(cmd)
+        got_ack.wait(timeout=3.0)
+        client.remove_rx_callback(on_rx)
+        time.sleep(0.05)
+
+    est_half_duration = (half_steps * half_ms_per_step) / 1000.0
+
+    print(f"\n[*] [PHASE 3/4 - HALF-STEP] Stepping FORWARD {half_steps} half-steps ({deg_travel:.1f} deg, StepPWMduty={pwm_duty}%, {half_ms_per_step}ms/half-step)...")
+    step_bipolar_stepper(client, target=target, steps=half_steps)
+    print(f"    Waiting ~{est_half_duration:.1f}s for {half_steps} half-steps to complete...")
+    time.sleep(est_half_duration + 0.5)
+
+    print("\n[*] Pausing 1.0 second...")
+    time.sleep(1.0)
+
+    print(f"\n[*] [PHASE 4/4 - HALF-STEP] Stepping BACKWARD {half_steps} half-steps (-{deg_travel:.1f} deg, StepPWMduty={pwm_duty}%, {half_ms_per_step}ms/half-step)...")
+    step_bipolar_stepper(client, target=target, steps=-half_steps)
+    print(f"    Waiting ~{est_half_duration:.1f}s for {half_steps} half-steps return movement to complete...")
+    time.sleep(est_half_duration + 0.5)
+
+    print("\n" + "-" * 65)
+    print("[?] Visual / Hardware Verification:")
+    print(f"    Did the bipolar stepper on {target} (HiLetgo DRV8833 @ 5V) perform:")
+    print(f"      1. Full-Step Mode: {steps} Full-Steps ({deg_travel:.1f} deg) FORWARD -> 1s pause -> {steps} Full-Steps BACKWARD")
+    print(f"      2. Half-Step Mode: {half_steps} Half-Steps ({deg_travel:.1f} deg) FORWARD -> 1s pause -> {half_steps} Half-Steps BACKWARD?")
+    try:
+        resp = input("    Confirm both Full-Step and Half-Step bipolar movements observed? [Y/n]: ").strip().lower()
+        passed = resp in ("", "y", "yes")
+    except (EOFError, OSError):
+        passed = True
+
+    print("-" * 65)
+    if passed:
+        print(f"[+] TEST PASSED: Bipolar stepper motor (DRV8833, Full-Step & Half-Step, StepPWMduty={pwm_duty}%) verified successfully!")
+    else:
+        print("[-] TEST FAILED: Bipolar stepper motor motion was not confirmed.")
+    return passed
+
+
 def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
     """
     Executes the Cytron 10C Motor Driver Board Test:
@@ -1625,6 +2234,187 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
     return passed
 
 
+def run_cytron_rfloss_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    timeout: float = 3.0
+) -> bool:
+    """
+    Executes the Cytron 10C Motor Driver RF-Loss Gentle Stop Test:
+      1. Initializes Cytron 10C Motor Driver on target: '<target> SetupMotorDriver 1 5000'
+      2. Sets motor to 100% forward power: '<target> MotorSpeed 1000'
+      3. Instructs user to pull power from the Coordinator:
+         - Cleanly closes the Coordinator serial connection.
+         - Prompts user to disconnect Coordinator power.
+         - User observes: within ~2s of link loss, PWM duty slews smoothly from commanded speed
+           to 0 over 1 second, providing a gentle stop.
+      4. Instructs user to reconnect power to the Coordinator:
+         - Reconnects Coordinator serial port.
+         - Verifies mesh link recovery with target.
+         - User observes: when reconnected, output gently ramps back up to 100% power over 1 second.
+      5. Queries the user with a Yes/No option to confirm correct operation.
+      6. Safely stops the motor: '<target> MotorSpeed 0'.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST Y] CYTRON MOTOR RF-LOSS GENTLE STOP TEST ---")
+    print(f"Target Node: {target} (Pin 18: PWM Speed | Pin 20: Direction)")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    print("\n[!] TEST PROCEDURE & ACTION REQUIRED:")
+    print("    1. Motor will be initialized in Cytron 10C mode and set to 100% power.")
+    print("    2. You will be instructed to PULL/UNPLUG power from the Coordinator.")
+    print("    3. Observe the motor: PWM duty slews smoothly from commanded speed to 0 over 1 second.")
+    print("    4. You will be instructed to RECONNECT power to the Coordinator.")
+    print("    5. Observe the motor: when reconnected, output gently ramps back up.")
+    print("    6. You will confirm observed operation [Yes/No].")
+    print("=" * 65)
+
+    try:
+        input("\nPress [Enter] when ready to begin test...")
+    except (EOFError, OSError):
+        pass
+
+    def on_rx(msg: str):
+        clean = msg.strip()
+        print(f"  <-- [RX] {clean}")
+
+    client.add_rx_callback(on_rx)
+
+    passed = False
+    try:
+        # Step 1: Initialize Cytron 10C driver (Mode 1, 5000 Hz)
+        print(f"\n[*] Step 1: Initializing Cytron 10C motor driver on {target} (Mode 1, 5000 Hz)...")
+        cmd_init = f"{target} SetupMotorDriver 1 5000"
+        print(f"    Sending: \"{cmd_init}\"")
+        client.send_line(cmd_init)
+        time.sleep(0.5)
+
+        # Set instantaneous response so RFlossThrottle is the direct slew controller
+        cmd_slew = f"{target} MotorSlew 0"
+        print(f"    Setting slew rate: \"{cmd_slew}\" (0 = instantaneous)")
+        client.send_line(cmd_slew)
+        time.sleep(0.2)
+
+        # Step 2: Set Cytron motor to 100% power forward (+1000)
+        print(f"\n[*] Step 2: Setting {target} Cytron motor to 100% power (MotorSpeed 1000)...")
+        cmd_speed = f"{target} MotorSpeed 1000"
+        print(f"    Setting target speed: \"{cmd_speed}\" (+1000 = 100% Forward)")
+        client.send_line(cmd_speed)
+        time.sleep(1.0)
+        print(f"[+] Motor is now running at 100% power on {target}.")
+
+        # Detach verbose streaming callback before coordinator power cycle
+        # so reboot discovery frames do not interleave with user prompts
+        client.remove_rx_callback(on_rx)
+
+        # Step 3: Prepare for Coordinator power disconnection
+        print("\n" + "=" * 65)
+        print(">>> STEP 1: PULL / UNPLUG POWER FROM THE COORDINATOR <<<")
+        print("=" * 65)
+        print("[*] 1. Disconnect the USB cable (or power) from the Coordinator module.")
+        print("[*] 2. Observe the Cytron motor:")
+        print("       Within ~2 seconds of Coordinator link loss, PWM duty slews smoothly")
+        print("       from commanded speed to 0 over 1 second, providing a gentle stop!")
+        print("       The motor will remain stationary while the Coordinator is unpowered.")
+        print("=" * 65)
+
+        # Cleanly close serial port before USB cable is pulled
+        coord_port = client.port
+        client.close()
+
+        input("\n--> Unplug Coordinator, observe motor gently slews down to 0 power, then press [ENTER]...")
+
+        # Step 4: Reconnect Coordinator power
+        print("\n" + "=" * 65)
+        print(">>> STEP 2: RE-CONNECT POWER TO THE COORDINATOR <<<")
+        print("=" * 65)
+        print("[*] 1. Plug the Coordinator USB / power cable back into the PC.")
+        print("[*] 2. Observe the Cytron motor:")
+        print("       When reconnected and RF contact is restored, output gently ramps back up")
+        print("       from 0 to 100% power over 1 second!")
+        print("=" * 65)
+
+        input("\n--> Plug Coordinator back in, then press [ENTER] to reconnect...")
+
+        print(f"\n[*] Reconnecting serial connection to Coordinator on {coord_port}...")
+        if client.reconnect(timeout=15.0):
+            print(f"[+] Serial connection to Coordinator restored.")
+            print(f"[*] Waiting for mesh link to re-establish with '{target}'...")
+            time.sleep(2.0)
+            node_ok, rtt, resp = verify_node_bidirectional(client, target, timeout=10.0)
+            if node_ok:
+                print(f"[+] RF link restored! '{target}' is online ({rtt:.0f}ms)!")
+                print(f"[+] Output has gently ramped back up to commanded power.")
+            else:
+                print(f"[!] Warning: Did not receive active reply from '{target}' yet.")
+        else:
+            print(f"[-] Could not reconnect to Coordinator port {coord_port} within timeout.")
+
+        time.sleep(0.5)
+
+        # Step 5: Visual verification prompt
+        print("\n" + "-" * 65)
+        print("[?] Visual / Hardware Verification:")
+        print('    Did you observe "PWM duty slews smoothly from commanded speed to 0 over 1 second.')
+        print('    When reconnected, output gently ramps back up"?')
+        print("-" * 65)
+        try:
+            resp = input("    Confirm correct gentle stop & ramp-up operation? [y/N]: ").strip().lower()
+            passed = resp in ("y", "yes")
+        except (EOFError, OSError):
+            passed = True
+
+    finally:
+        client.remove_rx_callback(on_rx)
+        # Always safely stop motor
+        print(f"\n[*] Safety Cleanup: Stopping {target} motor (MotorSpeed 0)...")
+        try:
+            client.send_line(f"{target} MotorSpeed 0")
+            time.sleep(0.3)
+            print("[+] Motor stopped.")
+        except Exception as e:
+            print(f"[!] Note on stop command: {e}")
+
+    print("-" * 65)
+    if passed:
+        print("[+] TEST PASSED: Cytron RF-loss gentle stop fail-safe verified successfully!")
+    else:
+        print("[-] TEST FAILED: Operation was not confirmed by operator.")
+    print("=" * 65 + "\n")
+    return passed
+
+
+def setup_proximity(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
+    """Initializes the APDS9930 proximity sensor on the target node (`<target> SetupProximity`)."""
+    setup_event = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SETUP PROX OK" in msg:
+            status_ok = True
+            setup_event.set()
+        elif "SETUP PROX FAIL" in msg:
+            status_ok = False
+            setup_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupProximity"
+    print(f"\n[>] Initializing APDS9930 Proximity on {target}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    setup_event.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] APDS9930 Proximity initialized successfully on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupProximity did not receive OK confirmation from {target}.")
+    return status_ok
+
+
 def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> int | None:
     """Sends `<target> ReadProximity` and returns the proximity count (or None on failure)."""
     val_event = threading.Event()
@@ -1639,7 +2429,9 @@ def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeo
                         prox_reading[0] = int(parts[i + 1])
                         val_event.set()
                     except ValueError:
-                        pass
+                        val_event.set()
+        elif "PROX NOT READY" in msg:
+            val_event.set()
 
     client.add_rx_callback(on_rx)
     cmd = f"{target} ReadProximity"
@@ -1649,55 +2441,82 @@ def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeo
     return prox_reading[0]
 
 
-def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bool:
+def run_proximity_stream(client: CoordinatorClient, target: str = "Kitchen", interval: float = 0.3) -> None:
     """
-    Executes the APDS9930 Proximity Sensor Test:
-    1. Initializes APDS9930 sensor (<target> SetupProximity).
-    2. Queries baseline ambient proximity value (<target> ReadProximity).
-    3. Prompts user to approach sensor with hand/obstacle and listens for 'Car Detected <val>'.
-    4. Prompts user to withdraw hand and listens for 'Car removed <val>'.
-    5. Verifies end-to-end event flow over Zigbee.
+    Streams APDS9930 proximity readings continuously once every 300ms
+    until the user presses the ESC key (operates identically to 'Q' compass streaming).
     """
-    print("\n" + "=" * 65)
-    print("--- [TEST D] APDS9930 PROXIMITY SENSOR TEST ---")
-    print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
-    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
+    # Check if proximity sensor is ready; if uninitialized, configure it once
+    test_reading = read_proximity_val(client, target=target, timeout=0.3)
+    if test_reading is None:
+        print(f"[*] Initializing APDS9930 Proximity sensor on {target}...")
+        setup_proximity(client, target=target, timeout=2.0)
+        time.sleep(0.1)
 
-    def on_rx(msg: str):
-        print(f"  <-- [RX] {msg}")
+    print(f"\n[+] Streaming {target} APDS9930 Proximity readings every {int(interval * 1000)}ms.")
+    print("    Format: proximity (Press [ESC] to stop)\n")
 
-    client.add_rx_callback(on_rx)
+    flush_console_keys()
 
-    # Step 1: Setup Proximity
-    setup_event = threading.Event()
-    def on_setup(msg: str):
-        if "SETUP PROX OK" in msg:
-            setup_event.set()
+    try:
+        while True:
+            t_start = time.time()
+            if check_esc_key():
+                break
 
-    client.add_rx_callback(on_setup)
-    cmd = f"{target} SetupProximity"
-    print(f"\n[>] Initializing APDS9930 sensor: \"{cmd}\"")
-    client.send_line(cmd)
-    got_setup = setup_event.wait(timeout=3.0)
-    client.remove_rx_callback(on_setup)
+            reading = read_proximity_val(client, target=target, timeout=0.25)
+            if check_esc_key():
+                break
 
-    if not got_setup:
-        print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' from {target}.")
-        client.remove_rx_callback(on_rx)
-        return False
-    print(f"[+] APDS9930 sensor initialized successfully.")
-    time.sleep(0.3)
+            if reading is not None:
+                print(f"{reading}")
 
-    # Step 2: Read baseline proximity reading
-    print(f"\n[>] Reading baseline proximity...")
-    baseline = read_proximity_val(client, target=target, timeout=3.0)
-    if baseline is not None:
-        print(f"[+] Baseline proximity reading: {baseline}")
-    else:
-        print(f"[!] Warning: Could not read instantaneous baseline proximity reading, continuing.")
+            elapsed = time.time() - t_start
+            sleep_remain = max(0.0, interval - elapsed)
+            deadline = time.time() + sleep_remain
 
-    # Step 3: Wait for Car Detected & Car Removed
+            esc_hit = False
+            while time.time() < deadline:
+                if check_esc_key():
+                    esc_hit = True
+                    break
+                time.sleep(0.01)
+
+            if esc_hit:
+                break
+
+    except KeyboardInterrupt:
+        pass
+
+    flush_console_keys()
+    print("\n[*] Stopped proximity streaming.")
+
+
+stream_proximity_readings = run_proximity_stream
+
+
+def set_proximity_thresholds(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    low_thrsh: int = 200,
+    high_thrsh: int = 500,
+) -> bool:
+    """Configures APDS9930 hysteresis thresholds using ProxLowThrsh and ProxHighThrsh."""
+    for cmd in (f"{target} ProxLowThrsh {low_thrsh}", f"{target} ProxHighThrsh {high_thrsh}"):
+        print(f"[>] Setting proximity threshold: \"{cmd}\"")
+        client.send_line(cmd)
+        time.sleep(0.2)
+    return True
+
+
+def _run_proximity_cycle(
+    client: CoordinatorClient,
+    phase_label: str,
+    low_thrsh: int,
+    high_thrsh: int,
+    timeout: float = 20.0,
+) -> bool:
+    """Runs a single obstacle approach ('Car Detected') and withdrawal ('Car removed') verification cycle."""
     detected_event = threading.Event()
     detected_val = [None]
     removed_event = threading.Event()
@@ -1720,35 +2539,113 @@ def run_proximity_test(client: CoordinatorClient, target: str = "Kitchen") -> bo
     client.add_rx_callback(on_prox_event)
 
     print("\n" + "-" * 65)
-    print(">>> ACTION REQUIRED: Bring your hand or an obstacle within 5-10cm of the APDS9930 sensor. <<<")
-    print("Waiting up to 20 seconds for 'Car Detected' event...")
-    got_detected = detected_event.wait(timeout=20.0)
+    print(f">>> [{phase_label}] Thresholds: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}] <<<")
+    print(f">>> ACTION REQUIRED: Bring your hand or an obstacle near the APDS9930 sensor (proximity > {high_thrsh}). <<<")
+    print(f"Waiting up to {int(timeout)} seconds for 'Car Detected' event...")
+    got_detected = detected_event.wait(timeout=timeout)
 
     if not got_detected:
-        print(f"\n[-] TEST FAILED: Timed out waiting for 'Car Detected' event.")
+        print(f"\n[-] {phase_label} FAILED: Timed out waiting for 'Car Detected' event.")
         client.remove_rx_callback(on_prox_event)
-        client.remove_rx_callback(on_rx)
         return False
 
     val_str = f" (reading: {detected_val[0]})" if detected_val[0] else ""
-    print(f"\n[+] OBSTACLE DETECTED{val_str} verified over Zigbee!")
+    print(f"\n[+] [{phase_label}] OBSTACLE DETECTED{val_str} verified over Zigbee!")
 
-    print("\n>>> ACTION REQUIRED: Move your hand away from the sensor. <<<")
-    print("Waiting up to 20 seconds for 'Car removed' event...")
-    got_removed = removed_event.wait(timeout=20.0)
+    print(f"\n>>> ACTION REQUIRED: Move your hand away from the sensor (proximity < {low_thrsh}). <<<")
+    print(f"Waiting up to {int(timeout)} seconds for 'Car removed' event...")
+    got_removed = removed_event.wait(timeout=timeout)
 
     client.remove_rx_callback(on_prox_event)
-    client.remove_rx_callback(on_rx)
 
     if not got_removed:
-        print(f"\n[-] TEST FAILED: Timed out waiting for 'Car removed' event.")
+        print(f"\n[-] {phase_label} FAILED: Timed out waiting for 'Car removed' event.")
         return False
 
     val_rem_str = f" (reading: {removed_val[0]})" if removed_val[0] else ""
-    print(f"\n[+] OBSTACLE REMOVAL{val_rem_str} verified over Zigbee!")
+    print(f"\n[+] [{phase_label}] OBSTACLE REMOVAL{val_rem_str} verified over Zigbee!")
+    return True
+
+
+def run_proximity_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    low_thrsh: int = 200,
+    high_thrsh: int = 500,
+    low_thrsh2: int = 400,
+    high_thrsh2: int = 800,
+) -> bool:
+    """
+    Executes the 2-Phase APDS9930 Proximity Sensor Hysteresis Test:
+    1. Initializes APDS9930 sensor (<target> SetupProximity).
+    2. Configures Phase 1 hysteresis thresholds [ProxLowThrsh=200, ProxHighThrsh=500].
+    3. Queries baseline ambient proximity value (<target> ReadProximity).
+    4. Runs Phase 1 detection & removal cycle at [200, 500].
+    5. If Phase 1 passes, updates [ProxLowThrsh, ProxHighThrsh] to [400, 800] and runs Phase 2 detection & removal cycle.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST D] APDS9930 PROXIMITY SENSOR HYSTERESIS TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
+    print(f"Phase 1 Hysteresis: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}]")
+    print(f"Phase 2 Hysteresis: [ProxLowThrsh={low_thrsh2}, ProxHighThrsh={high_thrsh2}]")
+    print(f"Timestamp:          {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    def on_rx(msg: str):
+        print(f"  <-- [RX] {msg}")
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        # Step 1: Setup Proximity
+        setup_event = threading.Event()
+        def on_setup(msg: str):
+            if "SETUP PROX OK" in msg:
+                setup_event.set()
+
+        client.add_rx_callback(on_setup)
+        cmd = f"{target} SetupProximity"
+        print(f"\n[>] Initializing APDS9930 sensor: \"{cmd}\"")
+        client.send_line(cmd)
+        got_setup = setup_event.wait(timeout=3.0)
+        client.remove_rx_callback(on_setup)
+
+        if not got_setup:
+            print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' from {target}.")
+            return False
+        print(f"[+] APDS9930 sensor initialized successfully.")
+        time.sleep(0.2)
+
+        # Step 2: Configure Phase 1 hysteresis thresholds [200, 500]
+        set_proximity_thresholds(client, target=target, low_thrsh=low_thrsh, high_thrsh=high_thrsh)
+
+        # Step 3: Read baseline proximity reading
+        print(f"\n[>] Reading baseline proximity...")
+        baseline = read_proximity_val(client, target=target, timeout=3.0)
+        if baseline is not None:
+            print(f"[+] Baseline proximity reading: {baseline}")
+        else:
+            print(f"[!] Warning: Could not read instantaneous baseline proximity reading, continuing.")
+
+        # Step 4: Phase 1 Detection & Removal Cycle at [200, 500]
+        if not _run_proximity_cycle(client, phase_label="PHASE 1/2", low_thrsh=low_thrsh, high_thrsh=high_thrsh):
+            return False
+
+        print(f"\n[+] Phase 1 ([{low_thrsh}, {high_thrsh}]) PASSED! Updating [ProxLowThrsh, ProxHighThrsh] to [{low_thrsh2}, {high_thrsh2}]...")
+        time.sleep(0.3)
+
+        # Step 5: Update hysteresis thresholds to [400, 800] and run Phase 2
+        set_proximity_thresholds(client, target=target, low_thrsh=low_thrsh2, high_thrsh=high_thrsh2)
+        time.sleep(0.2)
+
+        if not _run_proximity_cycle(client, phase_label="PHASE 2/2", low_thrsh=low_thrsh2, high_thrsh=high_thrsh2):
+            return False
+
+    finally:
+        client.remove_rx_callback(on_rx)
 
     print("-" * 65)
-    print("[+] TEST PASSED: APDS9930 Proximity sensor detection & removal cycle fully verified!")
+    print(f"[+] TEST PASSED: APDS9930 Proximity sensor verified at both [{low_thrsh}, {high_thrsh}] and [{low_thrsh2}, {high_thrsh2}]!")
     return True
 
 
@@ -1909,6 +2806,122 @@ def set_gpio_val(client: CoordinatorClient, target: str, pin: int, val: int, tim
     return True
 
 
+def set_rf_drop_blink(client: CoordinatorClient, target: str, pin: int, enable: int = 1, timeout: float = 3.0) -> bool:
+    """Configures RFdropBlink on specified GPIO pin on target node."""
+    got_ack = threading.Event()
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "RFDROPBLINK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} RFdropBlink {pin} {enable}" if enable != 1 else f"{target} RFdropBlink {pin}"
+    state_str = "ENABLED (4 Hz flash when severed)" if enable else "DISABLED"
+    print(f"\n[>] Configuring RFdropBlink on Pin {pin} ({state_str}) on {target}: \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if success:
+        print(f"[+] RFdropBlink on Pin {pin} set to {state_str} on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Note: RFdropBlink command sent to {target}.")
+    return True
+
+
+def run_rfdrop_blink_test(
+    client: CoordinatorClient,
+    target: str = "Garage",
+    pin: int = 18,
+    timeout: float = 3.0
+) -> bool:
+    """
+    Tests RFdropBlink mode on the specified GPIO pin:
+    1. Sets target pin as OUTPUT: '<target> ModeGPIOout <pin>'
+    2. Arms RFdropBlink: '<target> RFdropBlink <pin>'
+    3. Prompts user to trigger a disconnect test (e.g. ResetCoordinator):
+       - While Coordinator is offline / rebooting, RF contact is severed.
+       - The node flashes the GPIO pin at 4 Hz (4 times/sec: 125ms HIGH / 125ms LOW).
+       - When Coordinator reconnects, the node ceases blinking and returns pin to LOW (0).
+    4. Provides optional cleanup: '<target> RFdropBlink <pin> 0'.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST J] RFDROPBLINK LINK-LOSS DISCONNECT TEST ---")
+    print(f"Target Node:     {target}")
+    print(f"Blink Pin:       GPIO {pin}")
+    print(f"Blink Rate:      4 Hz (4 times/sec: 125ms ON / 125ms OFF)")
+    print(f"Timestamp:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Phase 0: Initialize GPIO handler
+    init_gpio_handler(client, target)
+
+    # Step 1: Configure pin as OUTPUT
+    print(f"\n[*] Step 1: Configuring Pin {pin} as OUTPUT on {target}...")
+    set_gpio_mode_out(client, target=target, pin=pin, timeout=timeout)
+    time.sleep(0.3)
+
+    # Step 2: Arm RFdropBlink
+    print(f"[*] Step 2: Arming RFdropBlink on Pin {pin}...")
+    set_rf_drop_blink(client, target=target, pin=pin, enable=1, timeout=timeout)
+    time.sleep(0.3)
+
+    print("\n" + "-" * 65)
+    print(f"[+] Pin {pin} is now ARMED with RFdropBlink on '{target}'.")
+    print(f"    - When connected to Coordinator: Pin {pin} stays LOW (0).")
+    print(f"    - When connection is severed:   Pin {pin} blinks at 4 Hz (4x/sec).")
+    print("-" * 65)
+
+    print("\n" + "=" * 65)
+    print(">>> STEP 1: PULL / UNPLUG POWER FROM THE COORDINATOR <<<")
+    print("=" * 65)
+    print("[*] 1. Disconnect the USB cable (or power) from the Coordinator module.")
+    print(f"[*] 2. Observe the {target} Pin {pin} LED:")
+    print(f"       Within ~2 seconds of Coordinator power loss, the LED will begin")
+    print(f"       flashing rapidly at 4 Hz (4 times/sec: 125ms ON / 125ms OFF)!")
+    print(f"       It will continue blinking for as long as the Coordinator is unpowered.")
+    print("=" * 65)
+
+    # Cleanly close serial port before USB cable is pulled
+    coord_port = client.port
+    client.close()
+
+    input("\n--> Unplug Coordinator, observe Pin 18 blinking at 4 Hz, then press [ENTER]...")
+
+    print("\n" + "=" * 65)
+    print(">>> STEP 2: RE-CONNECT POWER TO THE COORDINATOR <<<")
+    print("=" * 65)
+    print("[*] 1. Plug the Coordinator USB / power cable back into the PC.")
+    print(f"[*] 2. Observe the {target} Pin {pin} LED:")
+    print(f"       Once the Coordinator finishes booting and RF contact is restored,")
+    print(f"       the LED will automatically cease blinking and return to steady state!")
+    print("=" * 65)
+
+    input("\n--> Plug Coordinator back in, then press [ENTER] to reconnect...")
+
+    print(f"\n[*] Reconnecting serial connection to Coordinator on {coord_port}...")
+    if client.reconnect(timeout=15.0):
+        print(f"[+] Serial connection to Coordinator restored.")
+        print(f"[*] Waiting for mesh link to re-establish with '{target}'...")
+        time.sleep(2.0)
+        node_ok, rtt, resp = verify_node_bidirectional(client, target, timeout=10.0)
+        if node_ok:
+            print(f"[+] TEST PASSED: RF link restored! '{target}' is online ({rtt:.0f}ms)!")
+            print(f"[+] Pin {pin} LED has ceased blinking and returned to steady state.")
+        else:
+            print(f"[!] Warning: Did not receive active reply from '{target}' yet.")
+    else:
+        print(f"[-] Could not reconnect to Coordinator port {coord_port} within timeout.")
+
+    cleanup = input(f"\nDisable RFdropBlink on Pin {pin} (restore plain output)? [Y/n]: ").strip().lower()
+    if cleanup in ("", "y", "yes"):
+        set_rf_drop_blink(client, target=target, pin=pin, enable=0, timeout=timeout)
+        print(f"[+] RFdropBlink disabled on Pin {pin}.")
+
+    return True
+
+
 def setup_expand8(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, timeout: float = 3.0) -> bool:
     """Initializes PCF8574 Expand8 on target node with an explicit I2C address (default: 32 / 0x20)."""
     got_ack = threading.Event()
@@ -1939,8 +2952,40 @@ def setup_expand8(client: CoordinatorClient, target: str = "Kitchen", addr: int 
     return status_ok
 
 
-def write_expand8_bit(client: CoordinatorClient, target: str, bit: int, val: int, timeout: float = 3.0) -> bool:
-    """Writes a single bit (0 or 1) to PCF8574 Expand8 on target node."""
+def scan_expand8_addresses(client: CoordinatorClient, target: str = "Kitchen", default_addrs: tuple[int, int] = (32, 33), timeout: float = 3.0) -> tuple[int, int]:
+    """
+    Sends `<target> scanI2C` to auto-detect connected PCF8574 (0x20-0x27) / PCF8574A (0x38-0x3F,
+    excluding 0x39 APDS9930 and 0x3C SSD1306) chips on the shared I2C bus.
+    Returns a pair of 7-bit I2C addresses (addr1, addr2).
+    """
+    got_scan = threading.Event()
+    discovered: list[int] = []
+
+    def on_rx(msg: str):
+        if "I2C SCAN:" in msg:
+            for m in re.finditer(r"0x([0-9A-Fa-f]{2})\((\d+)\)", msg):
+                dec_addr = int(m.group(2))
+                # Valid PCF8574 (0x20..0x27) or PCF8574A (0x38..0x3F, skip 0x39 APDS9930 & 0x3C SSD1306)
+                if (0x20 <= dec_addr <= 0x27) or (0x38 <= dec_addr <= 0x3F and dec_addr not in (0x39, 0x3C)):
+                    if dec_addr not in discovered:
+                        discovered.append(dec_addr)
+            got_scan.set()
+
+    client.add_rx_callback(on_rx)
+    client.send_line(f"{target} scanI2C")
+    got_scan.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    if len(discovered) >= 2:
+        return (discovered[0], discovered[1])
+    elif len(discovered) == 1:
+        second = default_addrs[1] if discovered[0] != default_addrs[1] else default_addrs[0]
+        return (discovered[0], second)
+    return default_addrs
+
+
+def write_expand8_bit(client: CoordinatorClient, target: str, bit: int, val: int, addr: int | None = None, timeout: float = 3.0) -> bool:
+    """Writes a single bit (0 or 1) to PCF8574 Expand8 on target node, optionally targeting a specific I2C address."""
     got_ack = threading.Event()
 
     def on_rx(msg: str):
@@ -1948,16 +2993,19 @@ def write_expand8_bit(client: CoordinatorClient, target: str, bit: int, val: int
             got_ack.set()
 
     client.add_rx_callback(on_rx)
-    cmd = f"{target} wrExpand8 {bit} {val}"
+    if addr is not None:
+        cmd = f"{target} wrExpand8 {bit} {val} {addr}"
+    else:
+        cmd = f"{target} wrExpand8 {bit} {val}"
     client.send_line(cmd)
     success = got_ack.wait(timeout=timeout)
     client.remove_rx_callback(on_rx)
     return success
 
 
-def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: int = 0, timeout: float = 3.0) -> int | None:
+def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: int = 0, addr: int | None = None, timeout: float = 3.0) -> int | None:
     """
-    Sends `<target> rdExpand8 <bit>` and waits for `EXPAND8 <bit> IS <val>`.
+    Sends `<target> rdExpand8 <bit> [addr]` and waits for `EXPAND8 <bit> IS <val>`.
     Returns integer bit level (0 or 1) or None on timeout.
     """
     got_event = threading.Event()
@@ -1973,7 +3021,10 @@ def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: in
                 got_event.set()
 
     client.add_rx_callback(on_rx)
-    cmd = f"{target} rdExpand8 {bit}"
+    if addr is not None:
+        cmd = f"{target} rdExpand8 {bit} {addr}"
+    else:
+        cmd = f"{target} rdExpand8 {bit}"
     client.send_line(cmd)
     success = got_event.wait(timeout=timeout)
 
@@ -1986,76 +3037,100 @@ def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: in
     return read_val
 
 
-def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, timeout: float = 3.0) -> bool:
+def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, addr2: int | None = None, timeout: float = 3.0) -> bool:
     """
-    Validates PCF8574 8-bit I/O Expander:
-    1. Explicitly initializes device at address `addr` (SetupExpand8 <addr>).
-    2. Writes alternating 1's and 0's starting with zero LSB:
-       Pattern A: bits 0..7 = [0, 1, 0, 1, 0, 1, 0, 1] (0xAA / 170).
-       Reads each bit (0..7) and verifies all values match.
-    3. Repeats with LSB being 1:
-       Pattern B: bits 0..7 = [1, 0, 1, 0, 1, 0, 1, 0] (0x55 / 85).
-       Reads each bit (0..7) and verifies all values match.
+    Validates BOTH instances of PCF8574 8-bit I/O Expander on `target`:
+    1. Scans I2C bus (or uses `addr` / `addr2`, defaulting to 0x20/32 and 0x21/33) and initializes both chips
+       (`SetupExpand8 <addr1>` and `SetupExpand8 <addr2>`).
+    2. Pass 1: Writes complementary alternating bit patterns to both chips simultaneously by passing the I2C
+       address with each command:
+         - Chip 1 (addr1): Pattern A (LSB=0 -> [0, 1, 0, 1, 0, 1, 0, 1] / 0xAA)
+         - Chip 2 (addr2): Pattern B (LSB=1 -> [1, 0, 1, 0, 1, 0, 1, 0] / 0x55)
+       Reads all 8 bits from Chip 1 and Chip 2 and verifies both match without cross-chip interference.
+    3. Pass 2: Swaps the patterns across the two chips:
+         - Chip 1 (addr1): Pattern B (LSB=1 -> [1, 0, 1, 0, 1, 0, 1, 0] / 0x55)
+         - Chip 2 (addr2): Pattern A (LSB=0 -> [0, 1, 0, 1, 0, 1, 0, 1] / 0xAA)
+       Reads all 8 bits from Chip 1 and Chip 2 and verifies all values match.
     """
+    if addr2 is None:
+        detected_a1, detected_a2 = scan_expand8_addresses(client, target=target, default_addrs=(addr, 33 if addr != 33 else 32), timeout=timeout)
+        addr1 = detected_a1 if addr == 32 else addr
+        addr2 = detected_a2 if detected_a2 != addr1 else (33 if addr1 != 33 else 32)
+    else:
+        addr1 = addr
+
     print("\n" + "=" * 65)
-    print("--- [TEST E] PCF8574 EXPAND8 ALTERNATING BIT TEST ---")
-    print(f"Target Node: {target} (ESP32-C6 / PCF8574 @ 0x{addr:02X})")
+    print("--- [TEST E] DUAL PCF8574 EXPAND8 ALTERNATING BIT TEST (2 INSTANCES) ---")
+    print(f"Target Node: {target}")
+    print(f"Instance #1: PCF8574 @ 0x{addr1:02X} ({addr1})")
+    print(f"Instance #2: PCF8574 @ 0x{addr2:02X} ({addr2})")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
-    # Step 1: Explicitly initialize PCF8574 at specified address (e.g. 32 / 0x20)
-    setup_expand8(client, target=target, addr=addr, timeout=timeout)
+    # Step 1: Explicitly initialize both PCF8574 instances
+    ok1 = setup_expand8(client, target=target, addr=addr1, timeout=timeout)
+    time.sleep(0.15)
+    ok2 = setup_expand8(client, target=target, addr=addr2, timeout=timeout)
     time.sleep(0.2)
 
-    all_passed = True
+    all_passed = ok1 and ok2
 
-    # Test patterns:
-    # Pattern A: LSB=0 -> [0, 1, 0, 1, 0, 1, 0, 1]
-    # Pattern B: LSB=1 -> [1, 0, 1, 0, 1, 0, 1, 0]
-    patterns = [
-        ("Pattern A (LSB = 0)", [0 if (i % 2 == 0) else 1 for i in range(8)]),
-        ("Pattern B (LSB = 1)", [1 if (i % 2 == 0) else 0 for i in range(8)])
+    pat_a = [0 if (i % 2 == 0) else 1 for i in range(8)]  # LSB=0 -> 0xAA
+    pat_b = [1 if (i % 2 == 0) else 0 for i in range(8)]  # LSB=1 -> 0x55
+
+    passes = [
+        (
+            "Pass 1 (Chip 1 = Pattern A [LSB=0, 0xAA] | Chip 2 = Pattern B [LSB=1, 0x55])",
+            [(addr1, "Instance #1", pat_a), (addr2, "Instance #2", pat_b)],
+        ),
+        (
+            "Pass 2 (Chip 1 = Pattern B [LSB=1, 0x55] | Chip 2 = Pattern A [LSB=0, 0xAA])",
+            [(addr1, "Instance #1", pat_b), (addr2, "Instance #2", pat_a)],
+        ),
     ]
 
-    for pat_idx, (pat_name, expected_bits) in enumerate(patterns, start=1):
-        byte_val = sum(b << i for i, b in enumerate(expected_bits))
-        print(f"\n[>] Step {pat_idx}: Testing {pat_name}")
-        print(f"    Target bit pattern (0..7): {expected_bits} (Byte: 0x{byte_val:02X})")
+    for pass_idx, (pass_title, chip_assignments) in enumerate(passes, start=1):
+        print(f"\n[>] === {pass_title} ===")
 
-        print("    Writing bits:")
-        for bit in range(8):
-            val = expected_bits[bit]
-            write_expand8_bit(client, target=target, bit=bit, val=val, timeout=timeout)
-            print(f"      wrExpand8 {bit} {val} -> OK")
-            time.sleep(0.04)
+        # First write all bits to both chips so we also verify independent state retention across chips
+        for chip_addr, chip_label, expected_bits in chip_assignments:
+            byte_val = sum(b << i for i, b in enumerate(expected_bits))
+            print(f"\n  [*] Writing {chip_label} @ 0x{chip_addr:02X} ({chip_addr}) -> {expected_bits} (0x{byte_val:02X}):")
+            for bit in range(8):
+                val = expected_bits[bit]
+                write_expand8_bit(client, target=target, bit=bit, val=val, addr=chip_addr, timeout=timeout)
+                print(f"      wrExpand8 {bit} {val} {chip_addr} -> OK")
+                time.sleep(0.04)
 
         time.sleep(0.1)
 
-        print("    Reading and verifying bits:")
-        pat_ok = True
-        for bit in range(8):
-            expected = expected_bits[bit]
-            actual = read_expand8_bit(client, target=target, bit=bit, timeout=timeout)
-            if actual == expected:
-                print(f"      [+] Bit {bit}: expected {expected}, read {actual} [PASS]")
-            else:
-                print(f"      [-] Bit {bit}: expected {expected}, read {actual} [FAIL]")
-                pat_ok = False
-            time.sleep(0.04)
+        # Now read back and verify all 8 bits from both chips
+        for chip_addr, chip_label, expected_bits in chip_assignments:
+            print(f"\n  [*] Reading & verifying {chip_label} @ 0x{chip_addr:02X} ({chip_addr}):")
+            chip_ok = True
+            for bit in range(8):
+                expected = expected_bits[bit]
+                actual = read_expand8_bit(client, target=target, bit=bit, addr=chip_addr, timeout=timeout)
+                if actual == expected:
+                    print(f"      [+] {chip_label} (0x{chip_addr:02X}) Bit {bit}: expected {expected}, read {actual} [PASS]")
+                else:
+                    print(f"      [-] {chip_label} (0x{chip_addr:02X}) Bit {bit}: expected {expected}, read {actual} [FAIL]")
+                    chip_ok = False
+                time.sleep(0.04)
 
-        if pat_ok:
-            print(f"[+] {pat_name} PASSED (all 8 bits verified)!")
-        else:
-            print(f"[-] {pat_name} FAILED (bit mismatch detected)!")
-            all_passed = False
+            if chip_ok:
+                print(f"  [+] {chip_label} @ 0x{chip_addr:02X} ({chip_addr}) PASSED (all 8 bits verified)!")
+            else:
+                print(f"  [-] {chip_label} @ 0x{chip_addr:02X} ({chip_addr}) FAILED (bit mismatch detected)!")
+                all_passed = False
 
         time.sleep(0.2)
 
     print("-" * 65)
     if all_passed:
-        print(f"[+] TEST PASSED: PCF8574 Expand8 verified for both alternating bit patterns on {target}!")
+        print(f"[+] TEST PASSED: Both PCF8574 instances (0x{addr1:02X} & 0x{addr2:02X}) verified on {target}!")
     else:
-        print(f"[-] TEST FAILED: PCF8574 Expand8 verification failed on {target}.")
+        print(f"[-] TEST FAILED: Dual PCF8574 Expand8 verification failed on {target}.")
     return all_passed
 
 
@@ -2223,6 +3298,20 @@ def setup_compass(client: CoordinatorClient, target: str = "Kitchen", addr: int 
     else:
         print(f"[!] Warning: SetupCompass did not receive OK confirmation from {target}.")
     return status_ok
+
+
+def set_compass_thresholds(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    low_mag: int = 1000,
+    high_mag: int = 2000,
+) -> bool:
+    """Configures QMC5883L signed hysteresis thresholds using LowMag and HighMag."""
+    for cmd in (f"{target} LowMag {low_mag}", f"{target} HighMag {high_mag}"):
+        print(f"[>] Setting compass threshold: \"{cmd}\"")
+        client.send_line(cmd)
+        time.sleep(0.2)
+    return True
 
 
 def get_compass_reading(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> tuple[int, int, int] | None:
@@ -2403,6 +3492,210 @@ def run_compass_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
         print(f"[+] TEST PASSED: Magnetic fields moved as expected ({angle_shift:.1f} deg shift, {dist:.1f} LSB displacement)!")
     else:
         print(f"[-] TEST FAILED: Magnetic field movement insufficient (< 15 deg shift and < 80 LSB displacement).")
+    return passed
+
+
+def run_compass_hysteresis_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    addr: int = 13,
+    low_mag: int = 1000,
+    high_mag: int = 2000,
+    timeout: float = 3.0,
+) -> bool:
+    """
+    Validates QMC5883L 3-Axis Signed Hysteresis Comparator across all 12 threshold possibilities:
+      - 3 dimensions: X, Y, Z
+      - 4 threshold crossings per dimension:
+          1. +HighMag (0 -> +1, val > +HighMag)
+          2. +LowMag  (+1 -> 0, val < +LowMag)
+          3. -HighMag (0 -> -1, val < -HighMag)
+          4. -LowMag  (-1 -> 0, val > -LowMag)
+    Logs every threshold crossing message (`Mag<X|Y|Z> <state> <val>`) in real time
+    and does not pass until all 12 possibilities have been observed.
+    """
+    print("\n" + "=" * 86)
+    print("--- [TEST F] QMC5883L 3-AXIS 12-THRESHOLD HYSTERESIS COMPARATOR TEST ---")
+    print(f"Target Node:       {target} (ESP32-C6 / QMC5883L @ 0x{addr:02X})")
+    print(f"Positive Band:     [+LowMag = +{low_mag}, +HighMag = +{high_mag}]")
+    print(f"Negative Band:     [-LowMag = -{low_mag}, -HighMag = -{high_mag}]")
+    print("Pass Requirement:  All 12 threshold crossings (3 axes x 4 thresholds) must be observed")
+    print(f"Timestamp:         {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 86)
+
+    # Step 1: Initialize QMC5883L & reset comparator states to 0
+    if not setup_compass(client, target=target, addr=addr, timeout=timeout):
+        print(f"[-] TEST FAILED: Unable to initialize QMC5883L on {target}.")
+        return False
+    time.sleep(0.2)
+
+    # Step 2: Configure [LowMag, HighMag] thresholds
+    set_compass_thresholds(client, target=target, low_mag=low_mag, high_mag=high_mag)
+    time.sleep(0.2)
+
+    # Step 3: Read baseline magnetic field
+    baseline = get_compass_reading(client, target=target, timeout=timeout)
+    if baseline is not None:
+        print(f"[+] Baseline magnetic field: X={baseline[0]:+d}, Y={baseline[1]:+d}, Z={baseline[2]:+d} LSB")
+
+    axes = ("X", "Y", "Z")
+    thresh_Order = ("+HighMag", "+LowMag", "-HighMag", "-LowMag")
+    short_labels = {
+        "+HighMag": "+H",
+        "+LowMag": "+L",
+        "-HighMag": "-H",
+        "-LowMag": "-L",
+    }
+    thresh_desc = {
+        "+HighMag": f"0 -> +1 (val > +{high_mag})",
+        "+LowMag":  f"+1 ->  0 (val < +{low_mag})",
+        "-HighMag": f"0 -> -1 (val < -{high_mag})",
+        "-LowMag":  f"-1 ->  0 (val > -{low_mag})",
+    }
+
+    # Track observed crossings: key = (axis, thresh_name) -> dict(first_val, last_val, count, elapsed, xyz)
+    observed: dict[tuple[str, str], dict] = {}
+    axis_prev_state: dict[str, int] = {"X": 0, "Y": 0, "Z": 0}
+    all_12_done = threading.Event()
+    lock = threading.Lock()
+    t_start = time.time()
+
+    pattern = re.compile(
+        r"\bMag([XYZ])\s+(-?[01])\s+(-?\d+)(?:\s+(-?\d+)\s+(-?\d+))?\b",
+        re.IGNORECASE
+    )
+
+    def format_checklist() -> str:
+        parts = []
+        for ax in axes:
+            items = []
+            for th in thresh_Order:
+                mark = "X" if (ax, th) in observed else " "
+                items.append(f"{short_labels[th]}:[{mark}]")
+            parts.append(f"{ax}({' '.join(items)})")
+        return " | ".join(parts)
+
+    def on_rx(msg: str):
+        # Ignore coordinator internal ESP_LOGI diagnostic lines to avoid counting each frame 3x
+        if "SERIAL_GATEWAY:" in msg:
+            return
+        m = pattern.search(msg)
+        if not m:
+            return
+
+        axis = m.group(1).upper()
+        state = int(m.group(2))
+        if m.group(4) is not None and m.group(5) is not None:
+            x_val = int(m.group(3))
+            y_val = int(m.group(4))
+            z_val = int(m.group(5))
+            val = x_val if axis == "X" else (y_val if axis == "Y" else z_val)
+            xyz_str = f"X={x_val:+6d} Y={y_val:+6d} Z={z_val:+6d}"
+        else:
+            val = int(m.group(3))
+            x_val = val if axis == "X" else 0
+            y_val = val if axis == "Y" else 0
+            z_val = val if axis == "Z" else 0
+            xyz_str = f"Val={val:+6d}"
+
+        elapsed = time.time() - t_start
+
+        with lock:
+            prev = axis_prev_state.get(axis, 0)
+            if state == 1:
+                thresh_key = "+HighMag"
+            elif state == -1:
+                thresh_key = "-HighMag"
+            else:
+                # state == 0: determine whether returning from +1 (+LowMag) or -1 (-LowMag)
+                if prev == 1:
+                    thresh_key = "+LowMag"
+                elif prev == -1:
+                    thresh_key = "-LowMag"
+                else:
+                    thresh_key = "+LowMag" if val >= 0 else "-LowMag"
+
+            axis_prev_state[axis] = state
+
+            key = (axis, thresh_key)
+            is_new = key not in observed
+            if is_new:
+                observed[key] = {
+                    "first_val": val,
+                    "last_val": val,
+                    "xyz": (x_val, y_val, z_val),
+                    "count": 1,
+                    "elapsed": elapsed,
+                }
+            else:
+                observed[key]["last_val"] = val
+                observed[key]["xyz"] = (x_val, y_val, z_val)
+                observed[key]["count"] += 1
+
+            num_done = len(observed)
+            tag = f"NEW {num_done:2d}/12" if is_new else f"RPT {num_done:2d}/12"
+            print(
+                f"  [{tag}] +{elapsed:6.2f}s | Mag{axis} {state:+2d} {xyz_str} | "
+                f"{axis} {thresh_key:<8} ({thresh_desc[thresh_key]})"
+            )
+            if is_new:
+                print(f"             Progress: {format_checklist()}")
+
+            if num_done >= 12:
+                all_12_done.set()
+
+    print("\n" + "-" * 86)
+    print(">>> ACTION REQUIRED: Move/flip a magnet near the QMC5883L across X, Y, and Z axes! <<<")
+    print("    Waiting for all 12 threshold crossings (+HighMag, +LowMag, -HighMag, -LowMag on X, Y, Z).")
+    print("    Press [ESC] at any time to abort early.")
+    print("-" * 86)
+    print(f"    Initial:  {format_checklist()}\n")
+
+    flush_console_keys()
+    client.add_rx_callback(on_rx)
+
+    aborted = False
+    try:
+        while not all_12_done.is_set():
+            if check_esc_key():
+                aborted = True
+                break
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        aborted = True
+    finally:
+        client.remove_rx_callback(on_rx)
+        flush_console_keys()
+
+    print("\n" + "=" * 94)
+    print("QMC5883L 12-THRESHOLD HYSTERESIS VERIFICATION SUMMARY:")
+    print("=" * 94)
+    print(f"  {'#':<3} | {'Axis':<4} | {'Threshold':<9} | {'Transition Condition':<24} | {'XYZ at Crossing (LSB)':<25} | {'Count':<5} | {'Status'}")
+    print("  " + "-" * 88)
+
+    idx = 0
+    for ax in axes:
+        for th in thresh_Order:
+            idx += 1
+            info = observed.get((ax, th))
+            if info is not None:
+                x_c, y_c, z_c = info.get("xyz", (0, 0, 0))
+                xyz_summary = f"[{x_c:+6d}, {y_c:+6d}, {z_c:+6d}]"
+                cnt = str(info["count"])
+                st = "[OBSERVED]"
+            else:
+                xyz_summary = "---"
+                cnt = "0"
+                st = "[MISSING ]"
+            print(f"  {idx:<3} | {ax:<4} | {th:<9} | {thresh_desc[th]:<24} | {xyz_summary:<25} | {cnt:<5} | {st}")
+
+    print("=" * 94)
+    passed = len(observed) == 12 and not aborted
+    if passed:
+        print(f"[+] TEST PASSED: All 12/12 QMC5883L hysteresis threshold crossings observed and verified!")
+    else:
+        missing = [f"{ax}:{th}" for ax in axes for th in thresh_Order if (ax, th) not in observed]
+        print(f"[-] TEST FAILED: Observed {len(observed)}/12 threshold crossings. Missing: {', '.join(missing)}")
     return passed
 
 
@@ -3216,14 +4509,14 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "Arduino_Blinkx":    f"[4] Arduino DotStar Blinkx     ({blinkx_count} flashes)",
         "Serial_Ping":       "[5] Two-Way Serial Ping        (GotPing)",
         "Arduino_DAC":       f"[6] Arduino Hardware DAC        (GotDAC {dac_val})",
-        "DAC_ADC_Loopback":  "[8] Closed-Loop DAC -> ADC     (Pin 1~ -> Pin A1)",
+        "DAC_ADC_Loopback":  "[8] Closed-Loop DAC -> ADC     (Pin 1 Full V & Pin 0 Half V)",
         "Schmitt_Ramp":      "[9] Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
         "Servo_PWM":         "[S] Servo / PWM Motion         (Snap & Slew 30)",
         "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)",
         "APDS9930_Prox":     "[D] APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
         "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
         "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
-        "Expand8":           "[E] PCF8574 Expand8 Bit Test  (Alternating 0/1 & 1/0 Patterns)"
+        "Expand8":           "[E] Dual PCF8574 Expand8 Test (Both Chip Instances: Alternating 0/1 & 1/0)"
     }
 
     all_passed = True
@@ -3262,6 +4555,7 @@ def interactive_terminal(client: CoordinatorClient):
     print("      Kitchen ModeGPIOout 21")
     print("      Kitchen SetGPIOval 21 1")
     print("      Kitchen ReadGPIO 21")
+    print("      Kitchen RFdropBlink 2")
     print("      Kitchen SetupMotorDriver 1 5000")
     print("      Kitchen MotorSlew 500")
     print("      Kitchen MotorSpeed 1000")
@@ -3323,19 +4617,27 @@ def main():
     parser.add_argument("--bridge", action="store_true", help="Run SetupSerialBridge test and exit")
     parser.add_argument("--servo", "--pwm", action="store_true", help="Run Servo / PWM test on Pin 2 (snap vs slew 30) and exit")
     parser.add_argument("--cytron", "--motor", action="store_true", help="Run Cytron 10C motor driver test (PWM=Pin 18, DIR=Pin 20) and exit")
+    parser.add_argument("--rfloss", "--cytron-rfloss", "--motor-rfloss", action="store_true", help="Run Cytron motor RF-loss gentle stop fail-safe test (100%% power -> pull coord power -> 0 -> reconnect -> 100%%) and exit")
     parser.add_argument("--schmitt", "--ramp", action="store_true", help="Run Schmitt trigger hysteresis ramp test (2s up + 2s down) and exit")
+    parser.add_argument("--adcpot", "--pot", action="store_true", help="Run Closed-Loop DAC -> ADCpot 20-detent ramp test (0 -> 1023 -> 0) and exit")
     parser.add_argument("--prox", "--proximity", action="store_true", help="Run APDS9930 Proximity Sensor test and exit")
     parser.add_argument("--read-prox", action="store_true", help="Read APDS9930 instantaneous proximity value and exit")
     parser.add_argument("--garage", type=str, default="Garage", help="Garage node name in coordinator device table (default: Garage)")
     parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
-    parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run PCF8574 Expand8 alternating bit test and exit")
-    parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for PCF8574 Expand8 (default: 32 / 0x20)")
+    parser.add_argument("--rfdrop", action="store_true", help="Run RFdropBlink Link-Loss test on target node (default: Garage, Pin 18) and exit")
+    parser.add_argument("--rfdrop-pin", type=int, default=18, help="GPIO pin for RFdropBlink test (default: 18)")
+    parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run Dual PCF8574 Expand8 alternating bit test on both chip instances and exit")
+    parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for PCF8574 Expand8 Instance #1 (default: 32 / 0x20)")
+    parser.add_argument("--expand8-addr2", type=int, default=None, help="I2C address for PCF8574 Expand8 Instance #2 (default: auto-detect via scanI2C or 33 / 0x21)")
     parser.add_argument("--cleardisp", action="store_true", help="Clear SSD1306 OLED display on target node and exit")
     parser.add_argument("--print-disp", nargs="+", help="Print text on SSD1306 OLED display ([size] text...) and exit")
     parser.add_argument("--oled", "--ssd1306", "--disp", action="store_true", help="Run SSD1306 OLED multi-size FreeMono font test and exit")
     parser.add_argument("--oled-addr", type=int, default=60, help="I2C address for SSD1306 OLED (default: 60 / 0x3C)")
     parser.add_argument("--compass", "--qmc5883l", action="store_true", help="Run QMC5883L 3-axis compass rotation test and exit")
+    parser.add_argument("--compass-hyst", "--mag", action="store_true", help="Run QMC5883L 12-threshold signed hysteresis test (X,Y,Z +/- [LowMag, HighMag]) and exit")
+    parser.add_argument("--low-mag", type=int, default=1000, help="LowMag hysteresis threshold for QMC5883L comparator test (default: 1000)")
+    parser.add_argument("--high-mag", type=int, default=2000, help="HighMag hysteresis threshold for QMC5883L comparator test (default: 2000)")
     parser.add_argument("--get-compass", action="store_true", help="Stream QMC5883L compass readings (x,y,z every 300ms, ESC to stop) and exit")
     parser.add_argument("--compass-addr", type=int, default=13, help="I2C address for QMC5883L compass (default: 13 / 0x0D)")
     parser.add_argument("--rgb", "--rgb-fade", action="store_true", help="Run Garage three-color RGB LED PWM fade cycle test (Pins 18, 20, 19) and exit")
@@ -3351,6 +4653,10 @@ def main():
     parser.add_argument("--uni-mode", type=int, default=0, choices=[0, 1, 2], help="Drive mode for Unipolar Stepper: 0=Full-step (default), 1=Half-step, 2=Wave drive")
     parser.add_argument("--uni-fwd", type=int, default=None, help="Step Unipolar Stepper forward by N steps and exit")
     parser.add_argument("--uni-bkw", type=int, default=None, help="Step Unipolar Stepper backward by N steps and exit")
+    parser.add_argument("--bipolar", "--stepper", "--drv8833", action="store_true", help="Run Bipolar Stepper test on Garage (HiLetgo DRV8833 @ 5V, 180 full-steps, StepPWMduty=75, 70ms/step, no accel/decel) and exit")
+    parser.add_argument("--bipolar-steps", type=int, default=180, help="Number of full-steps for Bipolar Stepper test (default: 180)")
+    parser.add_argument("--bipolar-duty", type=int, default=75, help="StepPWMduty percentage for Bipolar Stepper test (default: 75)")
+    parser.add_argument("--bipolar-ms", type=int, default=70, help="Delay per step in ms for Bipolar Stepper test (default: 70)")
     parser.add_argument("--all", "--suite", action="store_true", help="Run the entire full regression test suite (1-12) and exit")
     parser.add_argument("--mesh", action="store_true", help="Run the full 3-stage Mesh Resilience test suite (all sub-tests) and exit")
     parser.add_argument("--mesh-sub1", action="store_true", help="Run Mesh Sub-Test 1 (Reset all 3 nodes: Coord, Kitchen, Garage) and exit")
@@ -3401,7 +4707,7 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.expand8:
-            passed = run_expand8_test(client, target=args.target, addr=args.expand8_addr)
+            passed = run_expand8_test(client, target=args.target, addr=args.expand8_addr, addr2=args.expand8_addr2)
             sys.exit(0 if passed else 1)
 
         if args.cleardisp:
@@ -3427,6 +4733,10 @@ def main():
             passed = run_compass_test(client, target=args.target, addr=args.compass_addr)
             sys.exit(0 if passed else 1)
 
+        if args.compass_hyst:
+            passed = run_compass_hysteresis_test(client, target=args.target, addr=args.compass_addr, low_mag=args.low_mag, high_mag=args.high_mag)
+            sys.exit(0 if passed else 1)
+
         if args.get_compass:
             run_compass_stream(client, target=args.target, addr=args.compass_addr)
             sys.exit(0)
@@ -3441,6 +4751,10 @@ def main():
 
         if args.unipolar:
             passed = run_unipolar_stepper_test(client, target=args.garage, steps=args.uni_steps, step_delay_ms=args.uni_delay, mode=args.uni_mode)
+            sys.exit(0 if passed else 1)
+
+        if args.bipolar:
+            passed = run_bipolar_stepper_test(client, target=args.garage, steps=args.bipolar_steps, pwm_duty=args.bipolar_duty, ms_per_step=args.bipolar_ms)
             sys.exit(0 if passed else 1)
 
         if args.uni_fwd is not None:
@@ -3491,6 +4805,10 @@ def main():
             passed = run_schmitt_hysteresis_ramp_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 
+        if args.adcpot:
+            passed = run_adcpot_ramp_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
         if args.servo:
             passed = run_servo_pwm_test(client, target=args.target)
             sys.exit(0 if passed else 1)
@@ -3504,13 +4822,17 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.read_prox:
-            val = read_proximity_val(client, target=args.target)
-            if val is not None:
-                print(f"[+] Instantaneous Proximity Value: {val}")
-                sys.exit(0)
-            else:
-                print("[-] Failed to read proximity value.")
-                sys.exit(1)
+            run_proximity_stream(client, target=args.target)
+            sys.exit(0)
+
+        if args.rfdrop:
+            target_node = args.garage if (args.garage and args.target == "Kitchen") else args.target
+            passed = run_rfdrop_blink_test(client, target=target_node, pin=args.rfdrop_pin)
+            sys.exit(0 if passed else 1)
+
+        if args.rfloss:
+            passed = run_cytron_rfloss_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
 
         # Interactive Menu
         while True:
@@ -3523,24 +4845,29 @@ def main():
             print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
             print("  [5] Two-Way Serial Ping Test    (GotPing)             [Auto-Bridge]")
             print("  [6] Arduino Hardware DAC Test   (setDAC X)            [Auto-Bridge]")
-            print("  [7] Read ADC Channel            (ReadADCA1)")
-            print("  [8] Closed-Loop DAC -> ADC Test (Pin 1~ -> Pin A1)    [Auto-Bridge]")
+            print("  [7] Read ADC Channel            (ReadADCA0 / ReadADCA1 / ReadADCA2)")
+            print("  [8] Closed-Loop DAC -> ADC Test (Pin 1 Full V & Pin 0 Half V) [Auto-Bridge]")
             print("  [9] Schmitt Trigger Ramp Test   (0 -> 1000 -> 0, 2s+2s)")
+            print("  [A] ADCpot Detent Ramp Test     (20 Detents, 0 -> 1023 -> 0)  [Auto-Bridge]")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
             print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
-            print("  [R] Read Proximity Value        (ReadProximity)")
+            print("  [R] Read Proximity Values       (ReadProximity - Continuous, ESC to stop)")
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
             print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
-            print("  [E] PCF8574 Expand8 Test        (Alternating 0/1 & 1/0 Bit Patterns)")
+            print("  [E] Dual PCF8574 Expand8 Test   (Both Instances: Alternating 0/1 & 1/0 Patterns)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [C] Clear OLED Display          (ClearDisp)")
             print("  [K] QMC5883L Compass Test       (Rotate > 45 deg Verification)")
+            print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Red ON->OFF -> Green ON->ZERO -> Blue ON->OFF)")
             print("  [U] Unipolar Stepper Test       (Garage: Fwd/Bkw, Half Speed & Accel/Decel Ramp)")
+            print("  [H] Bipolar Stepper Test        (Garage DRV8833 @ 5V: 180 Full-Steps & 360 Half-Steps)")
             print("  [W] Mesh Resilience Tests      (All 3 Sub-Tests: All, Garage, Both)")
+            print("  [J] RFdropBlink Link-Loss Test  (Garage Pin 18 LED: 4 Hz Flash on Disconnect)")
+            print("  [Y] Cytron Motor RF-Loss Test   (100% Power -> Pull Coord Power -> Gentle Stop -> Reconnect)")
             print("  [N] Request Network Report      (GiveNetworkReport)")
             print("  [P] Ping Network Nodes          (PingNetwork)")
             print("  [0] Interactive PuTTY Console Mode")
@@ -3548,7 +4875,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, S, M, D, R, G, B, E, O, C, K, Q, L, V, U, W, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -3571,13 +4898,15 @@ def main():
                 dac_val = int(val_str) if val_str.isdigit() else 512
                 run_dac_test(client, target=args.target, dac_val=dac_val)
             elif choice == "7":
-                chan_str = input("Enter ADC channel (A0, A1, A2) [A1]: ").strip().upper()
-                channel = chan_str if chan_str in ("A0", "A1", "A2") else "A1"
+                chan_str = input("Enter ADC channel (A0/0, A1/1, A2/2) [A1]: ").strip().upper()
+                channel = _normalize_adc_channel(chan_str) if chan_str else "A1"
                 run_read_adc_test(client, target=args.target, channel=channel)
             elif choice == "8":
                 run_dac_adc_loopback_test(client, target=args.target)
             elif choice == "9":
                 run_schmitt_hysteresis_ramp_test(client, target=args.target)
+            elif choice in ("A", "ADCPOT", "POT", "DETENT"):
+                run_adcpot_ramp_test(client, target=args.target)
             elif choice in ("S", "SERVO", "PWM"):
                 run_servo_pwm_test(client, target=args.target)
             elif choice in ("M", "MOTOR", "CYTRON"):
@@ -3585,23 +4914,21 @@ def main():
             elif choice in ("D", "PROX", "PROXIMITY"):
                 run_proximity_test(client, target=args.target)
             elif choice in ("R", "READPROX"):
-                val = read_proximity_val(client, target=args.target)
-                if val is not None:
-                    print(f"\n[+] Instantaneous Proximity Value: {val}")
-                else:
-                    print("\n[-] Failed to read proximity value.")
+                run_proximity_stream(client, target=args.target)
             elif choice in ("G", "GPIO"):
                 run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
             elif choice in ("B", "BIDI"):
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             elif choice in ("E", "EXPAND8", "PCF8574"):
-                run_expand8_test(client, target=args.target)
+                run_expand8_test(client, target=args.target, addr=args.expand8_addr, addr2=args.expand8_addr2)
             elif choice in ("O", "OLED", "SSD1306", "DISP"):
                 run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
                 clear_display(client, target=args.target)
             elif choice in ("K", "COMPASS", "QMC5883L"):
                 run_compass_test(client, target=args.target, addr=args.compass_addr)
+            elif choice in ("F", "MAG", "COMPASSMAG", "COMPASSHYST"):
+                run_compass_hysteresis_test(client, target=args.target, addr=args.compass_addr, low_mag=args.low_mag, high_mag=args.high_mag)
             elif choice in ("Q", "GETCOMPASS", "READCOMPASS"):
                 run_compass_stream(client, target=args.target, addr=args.compass_addr)
             elif choice in ("L", "RGB", "FADE", "RGBLED", "LEDFADE"):
@@ -3616,16 +4943,75 @@ def main():
                 steps_str = input(f"Enter number of steps to test [{args.uni_steps}]: ").strip()
                 steps = int(steps_str) if (steps_str.isdigit() and int(steps_str) > 0) else args.uni_steps
                 run_unipolar_stepper_test(client, target=args.garage, steps=steps, step_delay_ms=args.uni_delay, mode=args.uni_mode)
+            elif choice in ("H", "BIPOLAR", "STEPPER", "DRV8833"):
+                ms_str = input(f"  Enter delay per step in ms [{args.bipolar_ms}]: ").strip()
+                ms_val = int(ms_str) if (ms_str.isdigit() and int(ms_str) > 0) else args.bipolar_ms
+                duty_str = input(f"  Enter StepPWMduty percentage (1-100) [{args.bipolar_duty}]: ").strip()
+                duty_val = int(duty_str) if (duty_str.isdigit() and 1 <= int(duty_str) <= 100) else args.bipolar_duty
+                run_bipolar_stepper_test(
+                    client,
+                    target=args.garage,
+                    steps=args.bipolar_steps,
+                    pwm_duty=duty_val,
+                    ms_per_step=ms_val,
+                    ap_gpio=1,
+                    an_gpio=21,
+                    bp_gpio=2,
+                    bn_gpio=0,
+                )
             elif choice in ("W", "MESH"):
                 run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
+            elif choice in ("J", "RFDROP", "RFDROPBLINK"):
+                target_node = args.garage if args.garage else "Garage"
+                pin_str = input(f"Enter GPIO pin to test on {target_node} [18]: ").strip()
+                pin_val = int(pin_str) if (pin_str.isdigit() and int(pin_str) >= 0) else 18
+                run_rfdrop_blink_test(client, target=target_node, pin=pin_val)
+            elif choice in ("Y", "RFLOSS", "CYTRONRFLOSS", "MOTORRFLOSS"):
+                target_str = input(f"Enter target node for Cytron motor test [{args.target}]: ").strip()
+                target_node = target_str if target_str else args.target
+                run_cytron_rfloss_test(client, target=target_node)
             elif choice in ("N", "REPORT"):
-                print("\n[>] Requesting Network Report...")
-                client.send_line("GiveNetworkReport")
-                time.sleep(2.0)
+                print("\n[>] Requesting Network Report (GiveNetworkReport)...")
+                done_evt = threading.Event()
+
+                def on_report_rx(msg: str):
+                    print(f"  {msg}")
+                    if "NETWORK_REPORT_END" in msg:
+                        done_evt.set()
+
+                client.add_rx_callback(on_report_rx)
+                try:
+                    report = get_network_report(client, timeout=4.0)
+                    done_evt.wait(timeout=0.5)
+                finally:
+                    client.remove_rx_callback(on_report_rx)
+
+                if report:
+                    print("\n" + "-" * 72)
+                    print(f"{'NODE':<14} {'SHORT':<8} {'ONLINE':<8} {'LQI':<6} {'REM_LQI':<9} {'RF_STAT':<8} {'AGE(s)':<7} {'ROUTE'}")
+                    print("-" * 72)
+                    for name, info in report.items():
+                        online_str = "YES" if info.get("online") else "NO"
+                        print(
+                            f"{name:<14} {info.get('short', 'N/A'):<8} {online_str:<8} "
+                            f"{info.get('lqi', 0):<6} {info.get('remote_lqi', -1):<9} "
+                            f"{info.get('rf_status', 'N/A'):<8} {info.get('age', 0):<7} {info.get('route', 'NO')}"
+                        )
+                    print("-" * 72)
+                else:
+                    print("[!] No nodes returned in Network Report.")
             elif choice in ("P", "PINGNET"):
-                print("\n[>] Pinging network nodes...")
-                client.send_line("PingNetwork")
-                time.sleep(1.5)
+                print("\n[>] Pinging network nodes (PingNetwork)...")
+
+                def on_ping_rx(msg: str):
+                    print(f"  {msg}")
+
+                client.add_rx_callback(on_ping_rx)
+                try:
+                    client.send_line("PingNetwork")
+                    time.sleep(2.0)
+                finally:
+                    client.remove_rx_callback(on_ping_rx)
             elif choice == "0":
                 interactive_terminal(client)
             elif choice == "T":

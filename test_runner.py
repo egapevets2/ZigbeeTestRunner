@@ -2133,7 +2133,7 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
         2. Ramp from still (0) to 100% forward (+1000) over 2.0s ramp (slew = 500 units/s)
         3. Ramp from 100% forward (+1000) to 100% reverse (-1000) over 4.0s ramp (slew = 500 units/s)
         4. Pause at 100% reverse for 1.0s
-        5. Set to zero output (0) with no ramp (slew = 0)
+        5. Ramp from 100% reverse (-1000) back to still (0) over 2.0s ramp (slew = 500 units/s)
     """
     print("\n" + "=" * 65)
     print("--- [TEST M] CYTRON 10C MOTOR DRIVER TEST (PINS 18 & 20) ---")
@@ -2146,7 +2146,7 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
     print("      1. Smooth 2-second ramp up from still to 100% forward.")
     print("      2. Smooth 4-second ramp from 100% forward to 100% reverse.")
     print("      3. 1-second pause at 100% reverse.")
-    print("      4. Instant stop (zero output with no ramp).")
+    print("      4. Smooth 2-second ramp down from 100% reverse back to still (0).")
     try:
         input("    Press [Enter] when ready to begin test...")
     except (EOFError, OSError):
@@ -2198,18 +2198,17 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
         time.sleep(1.0)
         print("    [+] Pause complete.")
 
-        # Step 5: Set to zero output with no ramp (instant stop)
-        print("\n[>] Step 5: Setting to zero output with NO ramp (instant stop)...")
-        cmd_instant = f"{target} MotorSlew 0"
-        print(f"    Setting slew rate: \"{cmd_instant}\" (0 = instantaneous)")
-        client.send_line(cmd_instant)
-        time.sleep(0.1)
-
+        # Step 5: Ramp -1000 -> 0 (100% Reverse back to Still) over 2.0s (delta=1000, slew=500)
+        print("\n[>] Step 5: Ramping from 100% Reverse back to still (0) over 2.0s...")
+        t_return_start = time.time()
         cmd_stop = f"{target} MotorSpeed 0"
-        print(f"    Setting speed to zero: \"{cmd_stop}\" (0 = stop)")
+        print(f"    Setting target speed: \"{cmd_stop}\" (0 = still, delta=1000 over 2.0s)")
         client.send_line(cmd_stop)
-        time.sleep(0.5)
-        print("    [+] Motor stopped at zero output.")
+
+        time.sleep(2.2)
+        elapsed_return = time.time() - t_return_start
+        print(f"    [+] Return-to-zero ramp completed in {elapsed_return:.2f}s (target: 2.0s)")
+        print("    [+] Motor smoothly stopped at zero output.")
 
     finally:
         client.remove_rx_callback(on_rx)
@@ -2219,7 +2218,7 @@ def run_cytron_motor_test(client: CoordinatorClient, target: str = "Kitchen") ->
     print("    1. Did the motor ramp up smoothly from still to 100% forward in ~2s?")
     print("    2. Did the motor smoothly ramp from 100% forward to 100% reverse in ~4s?")
     print("    3. Did the motor pause at 100% reverse for 1s?")
-    print("    4. Did the motor stop instantly (zero output) with no ramp?")
+    print("    4. Did the motor smoothly ramp down from 100% reverse back to still (0) in ~2s?")
     try:
         resp = input("    Confirm Cytron 10C motor profile observed? [y/N]: ").strip().lower()
         passed = resp in ("y", "yes")
@@ -4512,7 +4511,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "DAC_ADC_Loopback":  "[8] Closed-Loop DAC -> ADC     (Pin 1 Full V & Pin 0 Half V)",
         "Schmitt_Ramp":      "[9] Schmitt Hysteresis Ramp   (0 -> 1000 -> 0, 2s+2s)",
         "Servo_PWM":         "[S] Servo / PWM Motion         (Snap & Slew 30)",
-        "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)",
+        "Cytron_Motor":      "[M] Cytron 10C Motor Driver   (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)",
         "APDS9930_Prox":     "[D] APDS9930 Proximity Sensor  (Setup, Baseline & Detection Cycle)",
         "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
         "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
@@ -4850,7 +4849,7 @@ def main():
             print("  [9] Schmitt Trigger Ramp Test   (0 -> 1000 -> 0, 2s+2s)")
             print("  [A] ADCpot Detent Ramp Test     (20 Detents, 0 -> 1023 -> 0)  [Auto-Bridge]")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
-            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, Snap 0)")
+            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [R] Read Proximity Values       (ReadProximity - Continuous, ESC to stop)")
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")

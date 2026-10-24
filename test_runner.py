@@ -9,6 +9,7 @@ import sys
 import time
 import math
 import re
+import queue
 import argparse
 import threading
 from datetime import datetime
@@ -3163,7 +3164,7 @@ def setup_ssd1306_display(client: CoordinatorClient, target: str = "Kitchen", ad
     return status_ok
 
 
-def clear_display(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
+def clear_display(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0, verbose: bool = True) -> bool:
     """Clears SSD1306 OLED display and resets cursor to top of screen."""
     got_ack = threading.Event()
     status_ok = False
@@ -3179,21 +3180,23 @@ def clear_display(client: CoordinatorClient, target: str = "Kitchen", timeout: f
 
     client.add_rx_callback(on_rx)
     cmd = f"{target} ClearDisp"
-    print(f"\n[>] Clearing SSD1306 display on {target}: \"{cmd}\"")
+    if verbose:
+        print(f"\n[>] Clearing SSD1306 display on {target}: \"{cmd}\"")
     start_time = time.time()
     client.send_line(cmd)
     got_ack.wait(timeout=timeout)
     elapsed = (time.time() - start_time) * 1000.0
     client.remove_rx_callback(on_rx)
 
-    if status_ok:
-        print(f"[+] ClearDisp succeeded on {target} ({elapsed:.1f}ms).")
-    else:
-        print(f"[!] ClearDisp did not receive OK confirmation from {target}.")
+    if verbose:
+        if status_ok:
+            print(f"[+] ClearDisp succeeded on {target} ({elapsed:.1f}ms).")
+        else:
+            print(f"[!] ClearDisp did not receive OK confirmation from {target}.")
     return status_ok
 
 
-def print_display_line(client: CoordinatorClient, target: str = "Kitchen", size: int = 12, text: str = "Hello World", timeout: float = 3.0) -> bool:
+def print_display_line(client: CoordinatorClient, target: str = "Kitchen", size: int = 12, text: str = "Hello World", timeout: float = 3.0, verbose: bool = True) -> bool:
     """Prints a line of text in FreeMono font (9, 12, 18, 24 pt) on SSD1306 and advances cursor."""
     got_ack = threading.Event()
     status_ok = False
@@ -3209,17 +3212,19 @@ def print_display_line(client: CoordinatorClient, target: str = "Kitchen", size:
 
     client.add_rx_callback(on_rx)
     cmd = f"{target} print {size} {text}"
-    print(f"\n[>] Printing line on {target} display ({size}pt: \"{text}\"): \"{cmd}\"")
+    if verbose:
+        print(f"\n[>] Printing line on {target} display ({size}pt: \"{text}\"): \"{cmd}\"")
     start_time = time.time()
     client.send_line(cmd)
     got_ack.wait(timeout=timeout)
     elapsed = (time.time() - start_time) * 1000.0
     client.remove_rx_callback(on_rx)
 
-    if status_ok:
-        print(f"[+] Print line succeeded on {target} ({elapsed:.1f}ms).")
-    else:
-        print(f"[!] Print line did not receive OK confirmation from {target}.")
+    if verbose:
+        if status_ok:
+            print(f"[+] Print line succeeded on {target} ({elapsed:.1f}ms).")
+        else:
+            print(f"[!] Print line did not receive OK confirmation from {target}.")
     return status_ok
 
 
@@ -3267,6 +3272,186 @@ def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     else:
         print(f"[-] TEST FAILED: SSD1306 OLED verification failed on {target}.")
     return all_passed
+
+
+def setup_rotary_encoder(client: CoordinatorClient, target: str = "N2", clk: int = 19, dt: int = 20, sw: int = 18, timeout: float = 3.0) -> bool:
+    """Initializes Keyes KY-040 Rotary Encoder on target node."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if f"< {target}:" in msg and ("SETUP ROTARY OK" in msg or "[ACK]" in msg):
+            status_ok = True
+            got_ack.set()
+        elif f"< {target}:" in msg and "SETUP ROTARY FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupRotary {clk} {dt} {sw}"
+    print(f"\n[>] Initializing Keyes KY-040 Rotary Encoder on {target} (SW={sw}, DT={dt}, CLK={clk}): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] Rotary Encoder initialized successfully on {target} ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupRotary did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def update_rotary_oled_display(client: CoordinatorClient, oled_target: str = "Kitchen", count: int = 0, sw_state: bool = False, font_size: int = 12) -> None:
+    """
+    Updates the Kitchen OLED display:
+      Line 1: Count value (floored at 0, ceiling at 8)
+      Line 2: Rotary switch SW state ("ON" or "OFF")
+    """
+    sw_text = "ON" if sw_state else "OFF"
+    # Clear OLED display to return cursor to line 1
+    clear_display(client, target=oled_target, timeout=1.5, verbose=False)
+    time.sleep(0.04)
+    # Line 1: count value
+    print_display_line(client, target=oled_target, size=font_size, text=f"Count: {count}", timeout=1.5, verbose=False)
+    time.sleep(0.04)
+    # Line 2: rotary switch SW state
+    print_display_line(client, target=oled_target, size=font_size, text=sw_text, timeout=1.5, verbose=False)
+
+
+def run_rotary_encoder_test(
+    client: CoordinatorClient,
+    rotary_target: str = "N2",
+    oled_target: str = "Kitchen",
+    oled_addr: int = 60,
+    sw_pin: int = 18,
+    dt_pin: int = 20,
+    clk_pin: int = 19,
+    initial_count: int = 0,
+) -> bool:
+    """
+    Interactive Keyes KY-040 Rotary Encoder Test:
+    - Node: N2
+    - Pins: SW=Pin 18, DT=Pin 20, CLK=Pin 19
+    - Kitchen OLED: Displays Count on Line 1 (0 to 8 range) and SW state (ON/OFF) on Line 2
+    - Tracks total count: CW increases count (ceiling 8), CCW decreases count (floor 0)
+    - Pushbutton SW toggles ON/OFF state
+    - Updates OLED Line 1 when count changes and Line 2 when SW state changes
+    - Press [ESC] to exit test.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST K] KEYES KY-040 ROTARY ENCODER -> OLED TEST ---")
+    print(f"Rotary Node: {rotary_target} (Pins: SW={sw_pin}, DT={dt_pin}, CLK={clk_pin})")
+    print(f"OLED Target: {oled_target} (SSD1306 @ 0x{oled_addr:02X})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Step 1: Configure Kitchen OLED Display
+    print(f"\n[*] Step 1: Configuring OLED display on {oled_target}...")
+    setup_ssd1306_display(client, target=oled_target, addr=oled_addr, timeout=3.0)
+    time.sleep(0.1)
+
+    # Step 2: Configure Rotary Encoder on N2
+    print(f"\n[*] Step 2: Configuring Keyes KY-040 Rotary Encoder on {rotary_target}...")
+    setup_rotary_encoder(client, target=rotary_target, clk=clk_pin, dt=dt_pin, sw=sw_pin, timeout=3.0)
+    time.sleep(0.1)
+
+    # Step 3: Initialize Display with initial count & SW state
+    count = max(0, min(8, initial_count))
+    sw_state = False  # Starts OFF
+    print(f"\n[*] Step 3: Setting initial OLED screen (Count={count}, SW={'ON' if sw_state else 'OFF'})...")
+    update_rotary_oled_display(client, oled_target=oled_target, count=count, sw_state=sw_state)
+
+    print("\n" + "-" * 65)
+    print(f"[*] Rotary Encoder live monitoring active!")
+    print(f"    - Turn Knob CW:  Count increases (Ceiling = 8)")
+    print(f"    - Turn Knob CCW: Count decreases (Floor = 0)")
+    print(f"    - Push Knob:     SW toggles between ON and OFF")
+    print(f"    - Press [ESC] to finish and return to menu.")
+    print("-" * 65 + "\n")
+
+    event_queue = queue.Queue()
+
+    def on_rx(msg: str):
+        if f"< {rotary_target}:" in msg or "Rotary" in msg:
+            if "RotaryCW" in msg:
+                event_queue.put("CW")
+            elif "RotaryCCW" in msg:
+                event_queue.put("CCW")
+            elif "RotaryButtonPushed" in msg:
+                event_queue.put("BUTTON")
+
+    client.add_rx_callback(on_rx)
+    flush_console_keys()
+
+    cw_events = 0
+    ccw_events = 0
+    btn_events = 0
+
+    try:
+        while True:
+            if check_esc_key():
+                break
+
+            try:
+                event = event_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            # Process event
+            dirty = False
+
+            events_batch = [event]
+            # Coalesce any queued events to avoid display lag
+            while not event_queue.empty():
+                try:
+                    events_batch.append(event_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            for evt in events_batch:
+                if evt == "CW":
+                    cw_events += 1
+                    if count < 8:
+                        count += 1
+                        dirty = True
+                        print(f"  [>] Rotary CW: Count -> {count} (ceiling 8)")
+                    else:
+                        print(f"  [>] Rotary CW: Count already at ceiling (8)")
+                elif evt == "CCW":
+                    ccw_events += 1
+                    if count > 0:
+                        count -= 1
+                        dirty = True
+                        print(f"  [<] Rotary CCW: Count -> {count} (floor 0)")
+                    else:
+                        print(f"  [<] Rotary CCW: Count already at floor (0)")
+                elif evt == "BUTTON":
+                    btn_events += 1
+                    sw_state = not sw_state
+                    dirty = True
+                    print(f"  [o] Rotary Button Pushed: SW state -> {'ON' if sw_state else 'OFF'}")
+
+            if dirty:
+                sw_str = "ON" if sw_state else "OFF"
+                print(f"[OLED UPDATE] Line 1: 'Count: {count}' | Line 2: '{sw_str}'")
+                update_rotary_oled_display(client, oled_target=oled_target, count=count, sw_state=sw_state)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        client.remove_rx_callback(on_rx)
+        flush_console_keys()
+
+    print("\n" + "-" * 65)
+    print(f"[*] Rotary test ended.")
+    print(f"    Final Count:    {count} (floor=0, ceiling=8)")
+    print(f"    Final SW State: {'ON' if sw_state else 'OFF'}")
+    print(f"    Total Events:   CW={cw_events}, CCW={ccw_events}, Button={btn_events}")
+    print("-" * 65)
+    return True
 
 
 def setup_compass(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, timeout: float = 3.0) -> bool:
@@ -4644,6 +4829,8 @@ def main():
     parser.add_argument("--mesh-sub3", action="store_true", help="Run Mesh Sub-Test 3 (Reset both Kitchen and Garage) and exit")
     parser.add_argument("--kitchen-port", type=str, default=None, help="Optional serial port for Kitchen node hardware reset (e.g. COM5)")
     parser.add_argument("--garage-port", type=str, default=None, help="Optional serial port for Garage node hardware reset (e.g. COM8)")
+    parser.add_argument("--n2", type=str, default="N2", help="N2 node name in coordinator device table (default: N2)")
+    parser.add_argument("--rotary", action="store_true", help="Run Keyes KY-040 Rotary Encoder test (N2 -> Kitchen OLED) and exit")
 
     args = parser.parse_args()
 
@@ -4658,6 +4845,10 @@ def main():
 
     try:
         # CLI direct test execution flags
+        if args.rotary:
+            passed = run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+            sys.exit(0 if passed else 1)
+
         if args.mesh:
             passed = run_mesh_resilience_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_port=args.kitchen_port, garage_port=args.garage_port)
             sys.exit(0 if passed else 1)
@@ -4836,6 +5027,7 @@ def main():
             print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
+            print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [18,20,19] -> OLED Kitchen Display)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Red ON->OFF -> Green ON->ZERO -> Blue ON->OFF)")
@@ -4858,7 +5050,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -4906,6 +5098,8 @@ def main():
                 run_expand8_test(client, target=args.target, addr=args.expand8_addr, addr2=args.expand8_addr2)
             elif choice in ("O", "OLED", "SSD1306", "DISP"):
                 run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
+            elif choice in ("K", "ROTARY", "ENCODER", "KY040"):
+                run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
                 clear_display(client, target=args.target)
             elif choice in ("F", "MAG", "COMPASSMAG", "COMPASSHYST"):

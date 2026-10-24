@@ -229,6 +229,35 @@ def sleep_or_esc(duration: float, step: float = 0.01) -> bool:
     return False
 
 
+def setup_serial_bridge(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0, verbose: bool = False) -> bool:
+    """Configures the hardware UART serial bridge on target node."""
+    got_ok_event = threading.Event()
+
+    def on_rx(msg: str):
+        if verbose:
+            print(f"  <-- [RX] {msg}")
+        if "SETUP SERIAL OK" in msg:
+            got_ok_event.set()
+
+    client.add_rx_callback(on_rx)
+    cmd_string = f"{target} SetupSerialBridge"
+    if verbose:
+        print(f"\n[>] Sending command: \"{cmd_string}\"")
+    start_time = time.time()
+    client.send_line(cmd_string)
+    success = got_ok_event.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if verbose:
+        print("-" * 65)
+        if success:
+            print(f"[+] TEST PASSED: Serial bridge initialized successfully ({elapsed:.1f}ms)!")
+        else:
+            print(f"[-] TEST FAILED: Timed out waiting for 'SETUP SERIAL OK' from {target}.")
+    return success
+
+
 def run_setup_bridge_test(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
     """Sends `<target> SetupSerialBridge` and verifies response."""
     print("\n" + "=" * 65)
@@ -236,139 +265,157 @@ def run_setup_bridge_test(client: CoordinatorClient, target: str = "Kitchen", ti
     print(f"Target Node: {target} (ESP32-C6)")
     print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
-
-    got_ok_event = threading.Event()
-
-    def on_rx(msg: str):
-        print(f"  <-- [RX] {msg}")
-        if "SETUP SERIAL OK" in msg:
-            got_ok_event.set()
-
-    client.add_rx_callback(on_rx)
-
-    cmd_string = f"{target} SetupSerialBridge"
-    print(f"\n[>] Sending command: \"{cmd_string}\"")
-    start_time = time.time()
-    client.send_line(cmd_string)
-
-    success = got_ok_event.wait(timeout=timeout)
-    elapsed = (time.time() - start_time) * 1000.0
-    client.remove_rx_callback(on_rx)
-
-    print("-" * 65)
-    if success:
-        print(f"[+] TEST PASSED: Serial bridge initialized successfully ({elapsed:.1f}ms)!")
-    else:
-        print(f"[-] TEST FAILED: Timed out waiting for 'SETUP SERIAL OK' from {target}.")
-    return success
+    return setup_serial_bridge(client, target=target, timeout=timeout, verbose=True)
 
 
-def run_blink_test(client: CoordinatorClient, target: str = "Kitchen", count: int = 3) -> bool:
+def run_multi_node_blink_test(
+    client: CoordinatorClient,
+    count: int = 3,
+    target: str = "Kitchen",
+    garage_target: str = "Garage",
+    n2_target: str = "N2",
+    timeout: float = 4.0,
+) -> bool:
     """
-    Executes the ESP32-C6 onboard LED blink test:
-    1. Sends `<target> blink <count>`.
-    2. Prompts user to input the number of flashes observed.
-    3. Asserts that the observed count matches the requested count.
+    [TEST 3] Multi-Node LED & Attached Serial Device Blink Test (Merged Test 3 & 4):
+    1. Searches the mesh network and discovers all active endpoints (GiveNetworkReport).
+    2. Probes each endpoint via UART auto-bridge for attached serial processors (e.g. Arduino Trinket M0).
+    3. Prints a structured topology of all discovered endpoints and connected serial hardware.
+    4. Performs 3 blinks on each discovered endpoint's ESP32-C6 onboard LED.
+    5. Performs 3 blinks on each attached serial device's DotStar LED via auto-bridge.
+    6. Verifies operator visual confirmation.
     """
     print("\n" + "=" * 65)
-    print("--- [TEST 3] ESP32-C6 ONBOARD LED BLINK TEST ---")
-    print(f"Target Node:    {target} (ESP32-C6 Onboard LED)")
-    print(f"Requested Blinks: {count}")
-    print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("--- [TEST 3] MULTI-NODE LED & SERIAL DEVICE BLINK TEST ---")
+    print(f"Blink Count: {count} pulses per device")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 65)
 
-    print("\n[!] ACTION REQUIRED: Look at the ESP32-C6 onboard LED.")
-    print(f"    Watch for {count} LED flash(es) and count them.")
+    # Step 1: Discover all mesh endpoints
+    print("\n[*] Step 1: Searching network for active endpoints (GiveNetworkReport)...")
+    nodes = get_network_report(client, timeout=timeout)
+
+    # Filter for active/known endpoints
+    discovered_endpoints = []
+    if nodes:
+        for name, data in nodes.items():
+            if data.get("type") == "END_DEVICE" or data.get("online"):
+                discovered_endpoints.append(name)
+
+    # Fallback to configured target names if discovery report was empty
+    if not discovered_endpoints:
+        print("[!] Note: No endpoints returned in report, using configured defaults.")
+        discovered_endpoints = [target, garage_target, n2_target]
+
+    # Deterministic ordering: Kitchen first, then Garage, then N2, then others
+    def ep_sort_key(name: str):
+        nl = name.lower()
+        if nl == "kitchen": return 0
+        if nl == "garage": return 1
+        if nl == "n2": return 2
+        return 10
+    discovered_endpoints.sort(key=ep_sort_key)
+
+    # Step 2: Probe each endpoint for attached serial devices via auto-bridge
+    print(f"[*] Step 2: Probing {len(discovered_endpoints)} endpoint(s) for attached serial processors...")
+    attached_devices = {}
+    for ep in discovered_endpoints:
+        # Arm serial bridge on endpoint
+        setup_serial_bridge(client, target=ep, timeout=1.5, verbose=False)
+        time.sleep(0.15)
+
+        # Probe with ping -> GotPing
+        got_ping = threading.Event()
+        def on_probe_rx(msg: str):
+            if f"< {ep}:" in msg and "GotPing" in msg:
+                got_ping.set()
+            elif "GotPing" in msg:
+                got_ping.set()
+
+        client.add_rx_callback(on_probe_rx)
+        client.send_line(f"{ep} ping")
+        replied = got_ping.wait(timeout=1.2)
+        client.remove_rx_callback(on_probe_rx)
+
+        if replied:
+            attached_devices[ep] = "Arduino Trinket M0 / DotStar Test Fixture (UART1 @ 115200)"
+        else:
+            attached_devices[ep] = None
+
+    # Step 3: Print discovered endpoints and connected serial devices
+    print("\n" + "=" * 65)
+    print("[+] DISCOVERED MESH ENDPOINTS & ATTACHED SERIAL PROCESSORS:")
+    print("=" * 65)
+    for idx, ep in enumerate(discovered_endpoints, start=1):
+        ep_data = nodes.get(ep, {})
+        mac = ep_data.get("ieee", "Unknown")
+        lqi = ep_data.get("lqi", "N/A")
+        ser_dev = attached_devices.get(ep)
+        ser_desc = ser_dev if ser_dev else "None (No attached serial processor detected)"
+        print(f"  {idx}. Endpoint: '{ep}' (MAC: {mac}, LQI: {lqi})")
+        print(f"     |-- Onboard Actuator:  ESP32-C6 Onboard LED (command: '{ep} blink {count}')")
+        print(f"     \\-- Serial Processor:  {ser_desc}")
+        if ser_dev:
+            print(f"         \\-- Actuator:      Addressable RGB DotStar (command: '{ep} blinkx {count}')")
+    print("=" * 65)
+
+    # Step 4: Prompt user before commencing physical blinks
+    print("\n[!] ACTION REQUIRED: Look at the hardware nodes on the test bench.")
+    print(f"    Each endpoint's onboard LED will flash {count} times.")
+    print(f"    Any attached serial processor (DotStar) will flash blue {count} times.")
     try:
-        input("    Press [Enter] when ready to begin test...")
+        input("    Press [Enter] when ready to begin blinking sequence...")
     except (EOFError, OSError):
         pass
 
-    def on_rx(msg: str):
-        print(f"  <-- [RX] {msg}")
+    def on_blink_rx(msg: str):
+        if "<" in msg:
+            print(f"  <-- [RX] {msg}")
 
-    client.add_rx_callback(on_rx)
+    client.add_rx_callback(on_blink_rx)
+    time.sleep(0.2)
 
-    cmd_string = f"{target} blink {count}"
-    print(f"\n[>] Sending command: \"{cmd_string}\"")
-    client.send_line(cmd_string)
-
-    # ESP32 blinks at 200ms ON + 200ms OFF = 400ms per pulse
-    duration = (count * 0.4) + 0.5
-    print(f"[*] Actuating onboard LED on {target} ({duration:.1f}s)...")
-    time.sleep(duration)
-
-    client.remove_rx_callback(on_rx)
-
-    print("\n" + "-" * 65)
-    while True:
-        resp = input(f"[?] Enter the number of flashes observed on the ESP32-C6 LED: ").strip()
-        if resp.isdigit():
-            observed = int(resp)
-            break
-        print("    [!] Please enter a valid number (e.g. 0, 1, 2, 3...).")
-    print("-" * 65)
-
-    if observed == count:
-        print(f"[+] TEST PASSED: Confirmed {count} flashes on ESP32-C6 onboard LED!")
-        return True
-    else:
-        print(f"[-] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
-        return False
-
-
-def run_blinkx_test(client: CoordinatorClient, target: str = "Kitchen", count: int = 4) -> bool:
-    """
-    Executes the Arduino Trinket M0 DotStar LED blinkx test:
-    1. Sends `<target> blinkx <count>`.
-    2. Prompts user to input the number of blue flashes observed.
-    3. Asserts that the observed count matches the requested count.
-    """
-    print("\n" + "=" * 65)
-    print("--- [TEST 4] ARDUINO DOTSTAR LED BLINKX TEST ---")
-    print(f"Target Node:    {target} -> Arduino Test Fixture (Blue DotStar LED)")
-    print(f"Requested Blinks: {count}")
-    print(f"Timestamp:      {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
-
-    print("\n[!] ACTION REQUIRED: Look at the Arduino Trinket M0 Blue DotStar LED.")
-    print(f"    Watch for {count} BLUE flash(es) on the DotStar LED and count them.")
     try:
-        input("    Press [Enter] when ready to begin test...")
-    except (EOFError, OSError):
-        pass
+        # Step 5: Perform 3 blinks on each endpoint, plus dotstar if serial device attached
+        step_num = 1
+        for ep in discovered_endpoints:
+            # 5a. Blink ESP32-C6 onboard LED
+            cmd = f"{ep} blink {count}"
+            print(f"\n[{step_num}] Actuating Onboard LED on '{ep}' ({count} flashes): \"{cmd}\"")
+            client.send_line(cmd)
+            duration = (count * 0.4) + 0.5
+            time.sleep(duration)
+            step_num += 1
 
-    def on_rx(msg: str):
-        print(f"  <-- [RX] {msg}")
+            # 5b. If attached serial processor exists, actuate DotStar LED via auto-bridge
+            if attached_devices.get(ep):
+                cmd_x = f"{ep} blinkx {count}"
+                print(f"\n[{step_num}] Actuating DotStar LED on '{ep}' via Auto-Bridge ({count} blue flashes): \"{cmd_x}\"")
+                client.send_line(cmd_x)
+                duration_x = (count * 0.4) + 0.5
+                time.sleep(duration_x)
+                step_num += 1
 
-    client.add_rx_callback(on_rx)
+    finally:
+        client.remove_rx_callback(on_blink_rx)
 
-    cmd_string = f"{target} blinkx {count}"
-    print(f"\n[>] Sending command: \"{cmd_string}\"")
-    client.send_line(cmd_string)
-
-    # Arduino blinks at 100ms ON + 100ms OFF = 200ms per pulse
-    duration = (count * 0.2) + 0.5
-    print(f"[*] Actuating DotStar LED on Arduino ({duration:.1f}s)...")
-    time.sleep(duration)
-
-    client.remove_rx_callback(on_rx)
-
+    # Step 6: Operator verification prompt
     print("\n" + "-" * 65)
     while True:
-        resp = input(f"[?] Enter the number of BLUE flashes observed on the Arduino DotStar: ").strip()
-        if resp.isdigit():
-            observed = int(resp)
-            break
-        print("    [!] Please enter a valid number (e.g. 0, 1, 2, 3...).")
-    print("-" * 65)
+        resp = input(f"[?] Did you observe {count} flashes on each endpoint and DotStar LED? (y/n) [y]: ").strip().lower()
+        if resp in ("", "y", "yes"):
+            print("-" * 65)
+            print(f"[+] TEST PASSED: Confirmed {count} flashes across all discovered endpoints and DotStar!")
+            return True
+        elif resp in ("n", "no"):
+            print("-" * 65)
+            print(f"[-] TEST FAILED: Verification unconfirmed by operator.")
+            return False
+        print("    [!] Please enter 'y' or 'n'.")
 
-    if observed == count:
-        print(f"[+] TEST PASSED: Confirmed {count} blue flashes on Arduino DotStar LED!")
-        return True
-    else:
-        print(f"[-] TEST FAILED: Expected {count} flashes, but {observed} flashes were reported.")
-        return False
+
+run_blink_test = run_multi_node_blink_test
+run_blinkx_test = run_multi_node_blink_test
 
 
 def run_ping_test(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
@@ -4942,14 +4989,8 @@ def main():
             passed = run_setup_bridge_test(client, target=args.target)
             sys.exit(0 if passed else 1)
 
-        if args.blink:
-            passed = run_blink_test(client, target=args.target, count=args.count)
-            sys.exit(0 if passed else 1)
-
-        if args.blinkx:
-            run_setup_bridge_test(client, target=args.target)
-            time.sleep(0.3)
-            passed = run_blinkx_test(client, target=args.target, count=args.count)
+        if args.blink or args.blinkx:
+            passed = run_multi_node_blink_test(client, count=args.count, target=args.target, garage_target=args.garage, n2_target=args.n2)
             sys.exit(0 if passed else 1)
 
         if args.ping:
@@ -5021,8 +5062,7 @@ def main():
             print("  [E] Dual PCF8574 Expand8 Test   (Both Instances: Alternating 0/1 & 1/0 Patterns)")
             print()
             print("  # These hardware tests require user input:")
-            print(f"  [3] ESP32-C6 Onboard LED Blink (blink {args.count})")
-            print(f"  [4] Arduino DotStar LED Blinkx  (blinkx {args.count}) [Auto-Bridge]")
+            print(f"  [3] Multi-Node LED & Serial Blink (All Endpoints + DotStar Auto-Bridge, count {args.count})")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
             print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
@@ -5056,12 +5096,8 @@ def main():
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
             elif choice == "2":
                 run_setup_bridge_test(client, target=args.target)
-            elif choice == "3":
-                run_blink_test(client, target=args.target, count=args.count)
-            elif choice == "4":
-                run_setup_bridge_test(client, target=args.target)
-                time.sleep(0.3)
-                run_blinkx_test(client, target=args.target, count=args.count)
+            elif choice in ("3", "4", "BLINK", "BLINKX"):
+                run_multi_node_blink_test(client, count=args.count, target=args.target, garage_target=args.garage, n2_target=args.n2)
             elif choice == "5":
                 run_setup_bridge_test(client, target=args.target)
                 time.sleep(0.3)

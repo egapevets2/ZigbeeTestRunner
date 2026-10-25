@@ -3446,15 +3446,28 @@ def run_rotary_encoder_test(
     print("-" * 65 + "\n")
 
     event_queue = queue.Queue()
+    last_event_type = None
+    last_event_time = 0.0
 
     def on_rx(msg: str):
+        nonlocal last_event_type, last_event_time
         if f"< {rotary_target}:" in msg or "Rotary" in msg:
+            evt = None
             if "RotaryCW" in msg:
-                event_queue.put("CW")
+                evt = "CW"
             elif "RotaryCCW" in msg:
-                event_queue.put("CCW")
+                evt = "CCW"
             elif "RotaryButtonPushed" in msg:
-                event_queue.put("BUTTON")
+                evt = "BUTTON"
+
+            if evt is not None:
+                now = time.time()
+                # Deduplicate identical events received within 50ms (ESP-NOW burst / serial duplicates)
+                if evt == last_event_type and (now - last_event_time) < 0.050:
+                    return
+                last_event_type = evt
+                last_event_time = now
+                event_queue.put(evt)
 
     client.add_rx_callback(on_rx)
     flush_console_keys()
@@ -3577,14 +3590,21 @@ def run_rotary_raw_monitor_test(
 
     flush_console_keys()
     last_bits_val = None
+    last_raw_msg = ""
+    last_raw_time = 0.0
     inverted = False
     half_step = False
 
     def on_rx(msg: str):
-        nonlocal last_bits_val
+        nonlocal last_bits_val, last_raw_msg, last_raw_time
         now_str = datetime.now().strftime("%H:%M:%S.%f")[:12]
+        now = time.time()
 
         if "RotaryBits" in msg:
+            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+                return
+            last_raw_msg = msg
+            last_raw_time = now
             try:
                 parts = msg.split()
                 bits = "??"
@@ -3618,10 +3638,22 @@ def run_rotary_raw_monitor_test(
                 print(f"{now_str:<14} [RAW] {msg.strip()}")
 
         elif "RotaryCW" in msg:
+            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+                return
+            last_raw_msg = msg
+            last_raw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [>>] FSM EMITTED: RotaryCW (Clockwise Detent Step)")
         elif "RotaryCCW" in msg:
+            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+                return
+            last_raw_msg = msg
+            last_raw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [<<] FSM EMITTED: RotaryCCW (Counter-Clockwise Detent Step)")
         elif "RotaryButtonPushed" in msg:
+            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+                return
+            last_raw_msg = msg
+            last_raw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [OO] FSM EMITTED: RotaryButtonPushed (Debounced Button Press)")
 
     client.add_rx_callback(on_rx)

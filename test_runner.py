@@ -3794,15 +3794,18 @@ def run_oled_menu_test(
     - OLED Target: Kitchen (SSD1306 @ 0x3C / 60)
     - 3 lines of 9pt FreeMono font.
     - Middle row (Row 1) serves as user's 'selection'.
-    - Top Level: Animals, Houses, Streets, Cars, Roofs, Back
-    - Cars Submenu: Buick, Oldsmobile, Ford, BMW, Elon, Back
+    - Menu Hierarchy:
+        Level 1 (Top): Animals, Houses, Streets, Cars, Roofs, Back
+        Level 2 (under Animals): Dogs, Cats, Horses, fish, turtles, birds, goats, Back
+        Level 3 (under Dogs): Woof, Poop, Whine, Run, Stay, Back
+        Level 2 (under Cars): Buick, Oldsmobile, Ford, BMW, Elon, Back
     - Navigation:
         CW rotates downward, CCW rotates upward.
         Top/bottom boundaries indicated by '---------'.
+        Clicking 'Back' always pops back up to previous level.
         Clicking 'Back' on Top Level turns screen DARK.
         Clicking button on dark screen wakes display to Top Level ('Animals' selected).
-        Clicking 'Cars' on Top Level enters Cars Submenu ('Buick' selected).
-        Clicking 'Back' on Cars Submenu returns to Top Level ('Cars' selected).
+        Clicking item with submenu (Animals, Dogs, Cars) enters that submenu with 1st item selected.
     - Controls:
         [ESC] Exit and return to menu
         [I] Invert CW/CCW direction
@@ -3827,12 +3830,43 @@ def run_oled_menu_test(
     client.send_line(f"{rotary_target} SetRotaryHalfStep 1")
     time.sleep(0.05)
 
-    MENU_TOP = ["Animals", "Houses", "Streets", "Cars", "Roofs", "Back"]
-    MENU_CARS = ["Buick", "Oldsmobile", "Ford", "BMW", "Elon", "Back"]
+    MENU_DEFINITIONS = {
+        "TOP": {
+            "name": "Top Level",
+            "items": ["Animals", "Houses", "Streets", "Cars", "Roofs", "Back"],
+            "children": {
+                "Animals": "ANIMALS",
+                "Cars": "CARS",
+            },
+        },
+        "ANIMALS": {
+            "name": "Animals",
+            "items": ["Dogs", "Cats", "Horses", "fish", "turtles", "birds", "goats", "Back"],
+            "children": {
+                "Dogs": "DOGS",
+            },
+        },
+        "DOGS": {
+            "name": "Dogs",
+            "items": ["Woof", "Poop", "Whine", "Run", "Stay", "Back"],
+            "children": {},
+        },
+        "CARS": {
+            "name": "Cars",
+            "items": ["Buick", "Oldsmobile", "Ford", "BMW", "Elon", "Back"],
+            "children": {},
+        },
+    }
+
     BOUNDARY = "---------"
 
-    current_level = "TOP"  # "TOP", "CARS", "DARK"
-    sel_idx = 0
+    class MenuFrame:
+        def __init__(self, key: str, sel_idx: int = 0):
+            self.key = key
+            self.sel_idx = sel_idx
+
+    menu_stack = [MenuFrame("TOP", 0)]
+    is_dark = False
     inverted = False
     half_step = True
 
@@ -3843,8 +3877,10 @@ def run_oled_menu_test(
         return top_str, mid_str, bot_str
 
     # Step 3: Setting initial OLED screen
-    l0, l1, l2 = get_lines(MENU_TOP, 0)
-    print(f"\n[*] Step 3: Setting initial OLED menu screen (Level: TOP, Selected: '{l1}')...")
+    curr = menu_stack[-1]
+    top_items = MENU_DEFINITIONS[curr.key]["items"]
+    l0, l1, l2 = get_lines(top_items, 0)
+    print(f"\n[*] Step 3: Setting initial OLED menu screen (Level: Top Level, Selected: '{l1}')...")
     print(f"  Line 1: {l0}")
     print(f"  Line 2: {l1}  <-- SELECTION")
     print(f"  Line 3: {l2}")
@@ -3854,7 +3890,7 @@ def run_oled_menu_test(
     print(f"[*] Multi-Level Menu active!")
     print(f"    - Turn Knob CW:  Move selection down")
     print(f"    - Turn Knob CCW: Move selection up")
-    print(f"    - Push Knob:     Select item / Wake dark screen")
+    print(f"    - Push Knob:     Select item / Submenu / Pop Back / Wake screen")
     print(f"    - Press [I]:     Invert CW/CCW rotation direction")
     print(f"    - Press [H]:     Toggle half-step mode")
     print(f"    - Press [ESC]:   Finish and return to menu.")
@@ -3923,67 +3959,78 @@ def run_oled_menu_test(
 
             if event == "CW":
                 cw_events += 1
-                if current_level != "DARK":
-                    items = MENU_TOP if current_level == "TOP" else MENU_CARS
-                    if sel_idx < len(items) - 1:
-                        sel_idx += 1
+                if not is_dark:
+                    curr = menu_stack[-1]
+                    menu_def = MENU_DEFINITIONS[curr.key]
+                    items = menu_def["items"]
+                    if curr.sel_idx < len(items) - 1:
+                        curr.sel_idx += 1
                         dirty = True
-                        print(f"  [>] Rotary CW: Selection -> '{items[sel_idx]}' ({sel_idx + 1}/{len(items)})")
+                        print(f"  [>] Rotary CW: Selection -> '{items[curr.sel_idx]}' ({curr.sel_idx + 1}/{len(items)})")
                     else:
-                        print(f"  [>] Rotary CW: At bottom of list ('{items[sel_idx]}')")
+                        print(f"  [>] Rotary CW: At bottom of list ('{items[curr.sel_idx]}')")
                 else:
                     print(f"  [>] Rotary CW: Screen is dark (press button to wake)")
 
             elif event == "CCW":
                 ccw_events += 1
-                if current_level != "DARK":
-                    items = MENU_TOP if current_level == "TOP" else MENU_CARS
-                    if sel_idx > 0:
-                        sel_idx -= 1
+                if not is_dark:
+                    curr = menu_stack[-1]
+                    menu_def = MENU_DEFINITIONS[curr.key]
+                    items = menu_def["items"]
+                    if curr.sel_idx > 0:
+                        curr.sel_idx -= 1
                         dirty = True
-                        print(f"  [<] Rotary CCW: Selection -> '{items[sel_idx]}' ({sel_idx + 1}/{len(items)})")
+                        print(f"  [<] Rotary CCW: Selection -> '{items[curr.sel_idx]}' ({curr.sel_idx + 1}/{len(items)})")
                     else:
-                        print(f"  [<] Rotary CCW: At top of list ('{items[sel_idx]}')")
+                        print(f"  [<] Rotary CCW: At top of list ('{items[curr.sel_idx]}')")
                 else:
                     print(f"  [<] Rotary CCW: Screen is dark (press button to wake)")
 
             elif event == "BTN_DOWN":
                 btn_events += 1
-                if current_level == "DARK":
-                    current_level = "TOP"
-                    sel_idx = 0
+                if is_dark:
+                    is_dark = False
+                    menu_stack = [MenuFrame("TOP", 0)]
                     dirty = True
                     print(f"  [o] Rotary Button Clicked: Screen waking up -> Top Level ('Animals' selected)")
-                elif current_level == "TOP":
-                    selected = MENU_TOP[sel_idx]
+                else:
+                    curr = menu_stack[-1]
+                    menu_def = MENU_DEFINITIONS[curr.key]
+                    items = menu_def["items"]
+                    selected = items[curr.sel_idx]
+
                     if selected == "Back":
-                        current_level = "DARK"
-                        clear_display(client, target=oled_target, timeout=0.8, verbose=False)
-                        print(f"  [o] Rotary Button Clicked on 'Back': Screen goes DARK (Click button to wake)")
-                    elif selected == "Cars":
-                        current_level = "CARS"
-                        sel_idx = 0
+                        if len(menu_stack) == 1:
+                            # At Top Level: screen goes dark
+                            is_dark = True
+                            clear_display(client, target=oled_target, timeout=0.8, verbose=False)
+                            print(f"  [o] Rotary Button Clicked on 'Back': Screen goes DARK (Click button to wake)")
+                        else:
+                            # Pop back up to previous level
+                            popped = menu_stack.pop()
+                            parent_curr = menu_stack[-1]
+                            parent_def = MENU_DEFINITIONS[parent_curr.key]
+                            dirty = True
+                            print(f"  [o] Rotary Button Clicked on 'Back': Popped back up to '{parent_def['name']}' -> '{parent_def['items'][parent_curr.sel_idx]}' selected")
+                    elif selected in menu_def.get("children", {}):
+                        child_key = menu_def["children"][selected]
+                        child_def = MENU_DEFINITIONS[child_key]
+                        menu_stack.append(MenuFrame(child_key, 0))
                         dirty = True
-                        print(f"  [o] Rotary Button Clicked on 'Cars': Entering Cars Submenu -> 'Buick' selected")
+                        print(f"  [o] Rotary Button Clicked on '{selected}': Entering {child_def['name']} -> '{child_def['items'][0]}' selected")
                     else:
-                        print(f"  [o] Rotary Button Clicked on: '{selected}' (Top Level)")
-                elif current_level == "CARS":
-                    selected = MENU_CARS[sel_idx]
-                    if selected == "Back":
-                        current_level = "TOP"
-                        sel_idx = MENU_TOP.index("Cars")
-                        dirty = True
-                        print(f"  [o] Rotary Button Clicked on 'Back': Returning to Top Level -> 'Cars' selected")
-                    else:
-                        print(f"  [o] Rotary Button Clicked on car: '{selected}'")
+                        print(f"  [o] Rotary Button Clicked on: '{selected}' ({menu_def['name']})")
 
             elif event == "BTN_UP":
                 pass
 
-            if dirty and current_level != "DARK":
-                items = MENU_TOP if current_level == "TOP" else MENU_CARS
-                l0, l1, l2 = get_lines(items, sel_idx)
-                print(f"[OLED MENU UPDATE] Level: {current_level} | Selected: [{l1}] ({sel_idx + 1}/{len(items)})")
+            if dirty and not is_dark:
+                curr = menu_stack[-1]
+                menu_def = MENU_DEFINITIONS[curr.key]
+                items = menu_def["items"]
+                l0, l1, l2 = get_lines(items, curr.sel_idx)
+                print(f"[OLED MENU UPDATE] Level: {menu_def['name']} (Depth {len(menu_stack)}) | Selected: [{l1}] ({curr.sel_idx + 1}/{len(items)})")
                 print(f"  Line 1: {l0}")
                 print(f"  Line 2: {l1}  <-- SELECTION")
                 print(f"  Line 3: {l2}")
@@ -3995,10 +4042,11 @@ def run_oled_menu_test(
         client.remove_rx_callback(on_rx)
         flush_console_keys()
 
+    final_desc = MENU_DEFINITIONS[menu_stack[-1].key]["name"] if not is_dark else "DARK"
     print("\n" + "-" * 65)
     print(f"[*] Menu test ended.")
-    print(f"    Final Level:     {current_level}")
-    print(f"    Final Selection: {sel_idx}")
+    print(f"    Final Level:     {final_desc}")
+    print(f"    Menu Depth:      {len(menu_stack)}")
     print(f"    Total Events:    CW={cw_events}, CCW={ccw_events}, Button={btn_events}")
     print("-" * 65)
     return True

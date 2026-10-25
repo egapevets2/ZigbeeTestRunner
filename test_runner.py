@@ -16,6 +16,9 @@ from datetime import datetime
 import serial
 import serial.tools.list_ports
 
+# Expected endpoints on the mesh network
+DEFAULT_EXPECTED_ENDPOINTS = ["Kitchen", "Garage", "N2", "N1"]
+
 
 class CoordinatorClient:
     """Manages serial communication with the Zigbee Coordinator."""
@@ -3786,6 +3789,7 @@ def run_oled_menu_test(
     sw_pin: int = 19,
     dt_pin: int = 20,
     clk_pin: int = 18,
+    expected_endpoints: list = None,
     timeout: float = 3.0,
 ) -> bool:
     """
@@ -3838,6 +3842,9 @@ def run_oled_menu_test(
     print(f"[*] Step 2b: Initializing Serial Bridge on {oled_target} for DotStar LED...")
     setup_serial_bridge(client, target=oled_target, timeout=timeout, verbose=False)
     time.sleep(0.05)
+
+    if expected_endpoints is None:
+        expected_endpoints = DEFAULT_EXPECTED_ENDPOINTS
 
     MENU_DEFINITIONS = {
         "TOP": {
@@ -4068,22 +4075,31 @@ def run_oled_menu_test(
                         print("  [>] Gathering RF LQI data via GiveNetworkReport...")
                         update_menu_oled_display(client, oled_target=oled_target, line0="---------", line1="Scanning...", line2="---------", font_size=9)
                         report = get_network_report(client, timeout=2.5)
-                        stat_items = []
+
+                        all_names = list(expected_endpoints)
                         if report:
-                            for name, data in sorted(report.items()):
-                                lqi = data.get("lqi", 0)
-                                rem_lqi = data.get("remote_lqi", -1)
+                            for name in sorted(report.keys()):
+                                if name not in all_names:
+                                    all_names.append(name)
+
+                        stat_items = []
+                        for name in all_names:
+                            info = report.get(name) if report else None
+                            if info and info.get("online", False):
+                                lqi = info.get("lqi", 0)
+                                rem_lqi = info.get("remote_lqi", -1)
                                 lqi_str = format_two_digits(lqi)
                                 rem_str = format_two_digits(rem_lqi)
                                 stat_items.append(f"{name[:2]} {lqi_str} {rem_str}")
-                        if not stat_items:
-                            stat_items.append("No data")
+                            else:
+                                stat_items.append(f"{name[:2]} GONE")
+
                         stat_items.append("Back")
 
                         MENU_DEFINITIONS["RF_STATS"]["items"] = stat_items
                         menu_stack.append(MenuFrame("RF_STATS", 0))
                         dirty = True
-                        print(f"  [+] Compiled RF stats list: {stat_items}")
+                        print(f"  [+] Compiled RF stats list ({len(stat_items)} items): {stat_items}")
                     elif selected in menu_def.get("children", {}):
                         child_key = menu_def["children"][selected]
                         child_def = MENU_DEFINITIONS[child_key]
@@ -5506,6 +5522,7 @@ def main():
     parser.add_argument("--rotary", action="store_true", help="Run Keyes KY-040 Rotary Encoder test (N2 -> Kitchen OLED) and exit")
     parser.add_argument("--rotary-raw", "--rotary-z", "-z", action="store_true", help="Run [Z] Keyes KY-040 2-bit raw monitor test (Print-on-Change) and exit")
     parser.add_argument("--menu", action="store_true", help="Run multi-level OLED menu test (N2 Rotary -> Kitchen OLED) and exit")
+    parser.add_argument("--expected", nargs="+", default=DEFAULT_EXPECTED_ENDPOINTS, help="Expected endpoints for RF stats (default: Kitchen Garage N2 N1)")
 
     args = parser.parse_args()
 
@@ -5521,7 +5538,7 @@ def main():
     try:
         # CLI direct test execution flags
         if args.menu:
-            passed = run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+            passed = run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr, expected_endpoints=args.expected)
             sys.exit(0 if passed else 1)
 
         if args.rotary_raw:
@@ -5759,7 +5776,7 @@ def main():
             elif choice in ("S", "SERVO", "PWM"):
                 run_servo_pwm_test(client, target=args.target)
             elif choice in ("M", "MENU", "OLEDMENU"):
-                run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+                run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr, expected_endpoints=args.expected)
             elif choice in ("I", "MOTOR", "CYTRON"):
                 run_cytron_motor_test(client, target=args.target)
             elif choice in ("D", "PROX", "PROXIMITY"):

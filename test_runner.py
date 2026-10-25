@@ -3423,7 +3423,9 @@ def run_rotary_encoder_test(
     # Step 2: Configure Rotary Encoder on N2
     print(f"\n[*] Step 2: Configuring Keyes KY-040 Rotary Encoder on {rotary_target}...")
     setup_rotary_encoder(client, target=rotary_target, clk=clk_pin, dt=dt_pin, sw=sw_pin, timeout=3.0)
-    time.sleep(0.1)
+    time.sleep(0.05)
+    client.send_line(f"{rotary_target} SetRotaryHalfStep 0")
+    time.sleep(0.05)
 
     # Step 3: Initialize Display with initial count & SW state
     count = max(0, min(8, initial_count))

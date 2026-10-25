@@ -3356,16 +3356,35 @@ def update_rotary_oled_display(client: CoordinatorClient, oled_target: str = "Ki
     Updates the Kitchen OLED display:
       Line 1: Count value (floored at 0, ceiling at 8)
       Line 2: Rotary switch SW state ("ON" or "OFF")
+    Uses atomic single-packet PrintLines command to eliminate screen blanking and multi-packet lag.
     """
     sw_text = "ON" if sw_state else "OFF"
-    # Clear OLED display to return cursor to line 1
-    clear_display(client, target=oled_target, timeout=1.5, verbose=False)
-    time.sleep(0.04)
-    # Line 1: count value
-    print_display_line(client, target=oled_target, size=font_size, text=f"Count: {count}", timeout=1.5, verbose=False)
-    time.sleep(0.04)
-    # Line 2: rotary switch SW state
-    print_display_line(client, target=oled_target, size=font_size, text=sw_text, timeout=1.5, verbose=False)
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if f"< {oled_target}:" in msg or oled_target in msg:
+            if "PRINT OK" in msg:
+                status_ok = True
+                got_ack.set()
+            elif "PRINT FAIL" in msg:
+                status_ok = False
+                got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{oled_target} PrintLines {font_size} Count: {count}|{sw_text}"
+    client.send_line(cmd)
+    got_ack.wait(timeout=0.8)
+    client.remove_rx_callback(on_rx)
+
+    # Fallback to legacy 3-command method if PrintLines is not acknowledged
+    if not status_ok:
+        clear_display(client, target=oled_target, timeout=0.8, verbose=False)
+        time.sleep(0.02)
+        print_display_line(client, target=oled_target, size=font_size, text=f"Count: {count}", timeout=0.8, verbose=False)
+        time.sleep(0.02)
+        print_display_line(client, target=oled_target, size=font_size, text=sw_text, timeout=0.8, verbose=False)
 
 
 def run_rotary_encoder_test(
@@ -3408,6 +3427,8 @@ def run_rotary_encoder_test(
     # Step 3: Initialize Display with initial count & SW state
     count = max(0, min(8, initial_count))
     sw_state = False  # Starts OFF
+    inverted = False
+    half_step = False
     print(f"\n[*] Step 3: Setting initial OLED screen (Count={count}, SW={'ON' if sw_state else 'OFF'})...")
     update_rotary_oled_display(client, oled_target=oled_target, count=count, sw_state=sw_state)
 
@@ -3416,7 +3437,9 @@ def run_rotary_encoder_test(
     print(f"    - Turn Knob CW:  Count increases (Ceiling = 8)")
     print(f"    - Turn Knob CCW: Count decreases (Floor = 0)")
     print(f"    - Push Knob:     SW toggles between ON and OFF")
-    print(f"    - Press [ESC] to finish and return to menu.")
+    print(f"    - Press [I]:     Invert CW/CCW rotation direction")
+    print(f"    - Press [H]:     Toggle half-step mode")
+    print(f"    - Press [ESC]:   Finish and return to menu.")
     print("-" * 65 + "\n")
 
     event_queue = queue.Queue()
@@ -3439,7 +3462,22 @@ def run_rotary_encoder_test(
 
     try:
         while True:
-            if check_esc_key():
+            # Check keyboard controls
+            if msvcrt is not None and msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch == b'\x1b':
+                    break
+                elif ch in (b'i', b'I'):
+                    inverted = not inverted
+                    client.send_line(f"{rotary_target} SetRotaryInvert {1 if inverted else 0}")
+                    print(f"[*] Rotary Direction Inverted: {'INVERTED' if inverted else 'NORMAL'}")
+                elif ch in (b'h', b'H'):
+                    half_step = not half_step
+                    client.send_line(f"{rotary_target} SetRotaryHalfStep {1 if half_step else 0}")
+                    print(f"[*] Rotary Half-Step Mode: {'ENABLED' if half_step else 'DISABLED'}")
+                elif ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
+                    msvcrt.getch()
+            elif check_esc_key():
                 break
 
             try:
@@ -3447,39 +3485,30 @@ def run_rotary_encoder_test(
             except queue.Empty:
                 continue
 
-            # Process event
+            # Process event individually to ensure no numbers are skipped
             dirty = False
 
-            events_batch = [event]
-            # Coalesce any queued events to avoid display lag
-            while not event_queue.empty():
-                try:
-                    events_batch.append(event_queue.get_nowait())
-                except queue.Empty:
-                    break
-
-            for evt in events_batch:
-                if evt == "CW":
-                    cw_events += 1
-                    if count < 8:
-                        count += 1
-                        dirty = True
-                        print(f"  [>] Rotary CW: Count -> {count} (ceiling 8)")
-                    else:
-                        print(f"  [>] Rotary CW: Count already at ceiling (8)")
-                elif evt == "CCW":
-                    ccw_events += 1
-                    if count > 0:
-                        count -= 1
-                        dirty = True
-                        print(f"  [<] Rotary CCW: Count -> {count} (floor 0)")
-                    else:
-                        print(f"  [<] Rotary CCW: Count already at floor (0)")
-                elif evt == "BUTTON":
-                    btn_events += 1
-                    sw_state = not sw_state
+            if event == "CW":
+                cw_events += 1
+                if count < 8:
+                    count += 1
                     dirty = True
-                    print(f"  [o] Rotary Button Pushed: SW state -> {'ON' if sw_state else 'OFF'}")
+                    print(f"  [>] Rotary CW: Count -> {count} (ceiling 8)")
+                else:
+                    print(f"  [>] Rotary CW: Count already at ceiling (8)")
+            elif event == "CCW":
+                ccw_events += 1
+                if count > 0:
+                    count -= 1
+                    dirty = True
+                    print(f"  [<] Rotary CCW: Count -> {count} (floor 0)")
+                else:
+                    print(f"  [<] Rotary CCW: Count already at floor (0)")
+            elif event == "BUTTON":
+                btn_events += 1
+                sw_state = not sw_state
+                dirty = True
+                print(f"  [o] Rotary Button Pushed: SW state -> {'ON' if sw_state else 'OFF'}")
 
             if dirty:
                 sw_str = "ON" if sw_state else "OFF"

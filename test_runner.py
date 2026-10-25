@@ -3798,6 +3798,8 @@ def run_oled_menu_test(
         Level 1 (Top): Animals, Houses, Streets, Cars, Roofs, Back
         Level 2 (under Animals): Dogs, Cats, Horses, fish, turtles, birds, goats, Back
         Level 3 (under Dogs): Woof, Poop, Whine, Run, Stay, Back
+        Level 4 (under Woof): 1, 2, 3, 4, 5, 6, 7, Back
+            - Clicking a number triggers N 'Woofs': Blue DotStar flashes 200ms with 500ms pause.
         Level 2 (under Cars): Buick, Oldsmobile, Ford, BMW, Elon, Back
     - Navigation:
         CW rotates downward, CCW rotates upward.
@@ -3805,7 +3807,7 @@ def run_oled_menu_test(
         Clicking 'Back' always pops back up to previous level.
         Clicking 'Back' on Top Level turns screen DARK.
         Clicking button on dark screen wakes display to Top Level ('Animals' selected).
-        Clicking item with submenu (Animals, Dogs, Cars) enters that submenu with 1st item selected.
+        Clicking item with submenu (Animals, Dogs, Woof, Cars) enters that submenu with 1st item selected.
     - Controls:
         [ESC] Exit and return to menu
         [I] Invert CW/CCW direction
@@ -3830,6 +3832,11 @@ def run_oled_menu_test(
     client.send_line(f"{rotary_target} SetRotaryHalfStep 1")
     time.sleep(0.05)
 
+    # Step 2b: Configuring Serial Bridge on Kitchen for DotStar actuation
+    print(f"[*] Step 2b: Initializing Serial Bridge on {oled_target} for DotStar LED...")
+    setup_serial_bridge(client, target=oled_target, timeout=timeout, verbose=False)
+    time.sleep(0.05)
+
     MENU_DEFINITIONS = {
         "TOP": {
             "name": "Top Level",
@@ -3849,6 +3856,13 @@ def run_oled_menu_test(
         "DOGS": {
             "name": "Dogs",
             "items": ["Woof", "Poop", "Whine", "Run", "Stay", "Back"],
+            "children": {
+                "Woof": "WOOF",
+            },
+        },
+        "WOOF": {
+            "name": "Woofs",
+            "items": ["1", "2", "3", "4", "5", "6", "7", "Back"],
             "children": {},
         },
         "CARS": {
@@ -3869,6 +3883,26 @@ def run_oled_menu_test(
     is_dark = False
     inverted = False
     half_step = True
+    woof_thread = None
+
+    def _execute_woofs(count: int):
+        print(f"\n[*] [WOOF ACTION] Starting {count} Woof(s)...")
+        for i in range(count):
+            print(f"  [>] Woof {i + 1}/{count}: Blue DotStar flashing (200ms)...")
+            client.send_line(f"{oled_target} blinkx 1")
+            time.sleep(0.40)  # Wait for 200ms off-delay + 200ms blue flash on Arduino
+            if i < count - 1:
+                print(f"  [.] Pause 500ms between Woofs...")
+                time.sleep(0.50)
+        print(f"[+] [WOOF ACTION] Finished {count} Woof(s)!\n")
+
+    def trigger_woof(count: int):
+        nonlocal woof_thread
+        if woof_thread and woof_thread.is_alive():
+            print("  [!] Woof sequence already in progress, please wait...")
+            return
+        woof_thread = threading.Thread(target=_execute_woofs, args=(count,), daemon=True)
+        woof_thread.start()
 
     def get_lines(items, idx):
         top_str = BOUNDARY if idx == 0 else items[idx - 1]
@@ -4019,6 +4053,10 @@ def run_oled_menu_test(
                         menu_stack.append(MenuFrame(child_key, 0))
                         dirty = True
                         print(f"  [o] Rotary Button Clicked on '{selected}': Entering {child_def['name']} -> '{child_def['items'][0]}' selected")
+                    elif curr.key == "WOOF" and selected.isdigit():
+                        num_woofs = int(selected)
+                        print(f"  [o] Rotary Button Clicked on '{selected}' in Woofs: Triggering {num_woofs} Woof(s)!")
+                        trigger_woof(num_woofs)
                     else:
                         print(f"  [o] Rotary Button Clicked on: '{selected}' ({menu_def['name']})")
 

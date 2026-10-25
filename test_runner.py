@@ -3424,14 +3424,14 @@ def run_rotary_encoder_test(
     print(f"\n[*] Step 2: Configuring Keyes KY-040 Rotary Encoder on {rotary_target}...")
     setup_rotary_encoder(client, target=rotary_target, clk=clk_pin, dt=dt_pin, sw=sw_pin, timeout=3.0)
     time.sleep(0.05)
-    client.send_line(f"{rotary_target} SetRotaryHalfStep 0")
+    client.send_line(f"{rotary_target} SetRotaryHalfStep 1")
     time.sleep(0.05)
 
     # Step 3: Initialize Display with initial count & SW state
     count = max(0, min(8, initial_count))
     sw_state = False  # Starts OFF
     inverted = False
-    half_step = False
+    half_step = True
     print(f"\n[*] Step 3: Setting initial OLED screen (Count={count}, SW={'ON' if sw_state else 'OFF'})...")
     update_rotary_oled_display(client, oled_target=oled_target, count=count, sw_state=sw_state)
 
@@ -3574,6 +3574,8 @@ def run_rotary_raw_monitor_test(
 
     # Step 2: Start raw bit streaming
     print(f"[*] Step 2: Enabling live raw bit monitoring on {target} ({target} MonitorRotary 1)...")
+    client.send_line(f"{target} SetRotaryHalfStep 1")
+    time.sleep(0.05)
     client.send_line(f"{target} MonitorRotary 1")
     time.sleep(0.1)
 
@@ -3595,7 +3597,7 @@ def run_rotary_raw_monitor_test(
     last_ccw_time = 0.0
     last_btn_time = 0.0
     inverted = False
-    half_step = False
+    half_step = True
 
     def on_rx(msg: str):
         nonlocal last_state, last_transition_time, last_cw_time, last_ccw_time, last_btn_time

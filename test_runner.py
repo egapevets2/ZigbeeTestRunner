@@ -3795,7 +3795,9 @@ def run_oled_menu_test(
     - 3 lines of 9pt FreeMono font.
     - Middle row (Row 1) serves as user's 'selection'.
     - Menu Hierarchy:
-        Level 1 (Top): Animals, Houses, Streets, Cars, Roofs, Back
+        Level 1 (Top): Animals, Houses, Streets, Cars, Roofs, RF stats, Back
+            - Clicking 'RF stats': Runs GiveNetworkReport and displays compiled list:
+              '<2-char Node> <2-digit LQI> <2-digit REM_LQI>'
         Level 2 (under Animals): Dogs, Cats, Horses, fish, turtles, birds, goats, Back
         Level 3 (under Dogs): Woof, Poop, Whine, Run, Stay, Back
         Level 4 (under Woof): 1, 2, 3, 4, 5, 6, 7, Back
@@ -3807,7 +3809,7 @@ def run_oled_menu_test(
         Clicking 'Back' always pops back up to previous level.
         Clicking 'Back' on Top Level turns screen DARK.
         Clicking button on dark screen wakes display to Top Level ('Animals' selected).
-        Clicking item with submenu (Animals, Dogs, Woof, Cars) enters that submenu with 1st item selected.
+        Clicking item with submenu (Animals, Dogs, Woof, Cars, RF stats) enters that submenu with 1st item selected.
     - Controls:
         [ESC] Exit and return to menu
         [I] Invert CW/CCW direction
@@ -3840,11 +3842,17 @@ def run_oled_menu_test(
     MENU_DEFINITIONS = {
         "TOP": {
             "name": "Top Level",
-            "items": ["Animals", "Houses", "Streets", "Cars", "Roofs", "Back"],
+            "items": ["Animals", "Houses", "Streets", "Cars", "Roofs", "RF stats", "Back"],
             "children": {
                 "Animals": "ANIMALS",
                 "Cars": "CARS",
+                "RF stats": "RF_STATS",
             },
+        },
+        "RF_STATS": {
+            "name": "RF stats",
+            "items": ["Scanning...", "Back"],
+            "children": {},
         },
         "ANIMALS": {
             "name": "Animals",
@@ -3873,6 +3881,15 @@ def run_oled_menu_test(
     }
 
     BOUNDARY = "---------"
+
+    def format_two_digits(val) -> str:
+        """Extracts upper two digits of LQI value, or '--' if unavailable."""
+        if val is None or val < 0:
+            return "--"
+        s = str(val)
+        if len(s) >= 2:
+            return s[:2]
+        return f"{val:02d}"
 
     class MenuFrame:
         def __init__(self, key: str, sel_idx: int = 0):
@@ -4047,6 +4064,26 @@ def run_oled_menu_test(
                             parent_def = MENU_DEFINITIONS[parent_curr.key]
                             dirty = True
                             print(f"  [o] Rotary Button Clicked on 'Back': Popped back up to '{parent_def['name']}' -> '{parent_def['items'][parent_curr.sel_idx]}' selected")
+                    elif selected == "RF stats":
+                        print("  [>] Gathering RF LQI data via GiveNetworkReport...")
+                        update_menu_oled_display(client, oled_target=oled_target, line0="---------", line1="Scanning...", line2="---------", font_size=9)
+                        report = get_network_report(client, timeout=2.5)
+                        stat_items = []
+                        if report:
+                            for name, data in sorted(report.items()):
+                                lqi = data.get("lqi", 0)
+                                rem_lqi = data.get("remote_lqi", -1)
+                                lqi_str = format_two_digits(lqi)
+                                rem_str = format_two_digits(rem_lqi)
+                                stat_items.append(f"{name[:2]} {lqi_str} {rem_str}")
+                        if not stat_items:
+                            stat_items.append("No data")
+                        stat_items.append("Back")
+
+                        MENU_DEFINITIONS["RF_STATS"]["items"] = stat_items
+                        menu_stack.append(MenuFrame("RF_STATS", 0))
+                        dirty = True
+                        print(f"  [+] Compiled RF stats list: {stat_items}")
                     elif selected in menu_def.get("children", {}):
                         child_key = menu_def["children"][selected]
                         child_def = MENU_DEFINITIONS[child_key]

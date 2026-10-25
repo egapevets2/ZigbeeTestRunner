@@ -3398,6 +3398,49 @@ def update_rotary_oled_display(client: CoordinatorClient, oled_target: str = "Ki
         print_display_line(client, target=oled_target, size=font_size, text=sw_text, timeout=0.8, verbose=False)
 
 
+def update_menu_oled_display(
+    client: CoordinatorClient,
+    oled_target: str = "Kitchen",
+    line0: str = "---------",
+    line1: str = "Animals",
+    line2: str = "Houses",
+    font_size: int = 9,
+    timeout: float = 0.8
+) -> None:
+    """
+    Renders 3 lines of 9pt text on the OLED display atomically.
+    Uses 'PrintLines 9 line0|line1|line2'.
+    Falls back to ClearDisp + 3x print if needed.
+    """
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if f"< {oled_target}:" in msg or oled_target in msg:
+            if "PRINT OK" in msg:
+                status_ok = True
+                got_ack.set()
+            elif "PRINT FAIL" in msg:
+                status_ok = False
+                got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{oled_target} PrintLines {font_size} {line0}|{line1}|{line2}"
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    if not status_ok:
+        clear_display(client, target=oled_target, timeout=0.8, verbose=False)
+        time.sleep(0.02)
+        print_display_line(client, target=oled_target, size=font_size, text=line0, timeout=0.8, verbose=False)
+        time.sleep(0.02)
+        print_display_line(client, target=oled_target, size=font_size, text=line1, timeout=0.8, verbose=False)
+        time.sleep(0.02)
+        print_display_line(client, target=oled_target, size=font_size, text=line2, timeout=0.8, verbose=False)
+
+
 def run_rotary_encoder_test(
     client: CoordinatorClient,
     rotary_target: str = "N2",
@@ -3732,6 +3775,232 @@ def run_rotary_raw_monitor_test(
     print("\n" + "-" * 75)
     print(f"[*] Test [Z] completed. Raw monitor stopped on {target}.")
     print("-" * 75)
+    return True
+
+
+def run_oled_menu_test(
+    client: CoordinatorClient,
+    rotary_target: str = "N2",
+    oled_target: str = "Kitchen",
+    oled_addr: int = 60,
+    sw_pin: int = 19,
+    dt_pin: int = 20,
+    clk_pin: int = 18,
+    timeout: float = 3.0,
+) -> bool:
+    """
+    [TEST M] Multi-Level OLED Menu Test:
+    - Rotary Node: N2 (SW=19, DT=20, CLK=18)
+    - OLED Target: Kitchen (SSD1306 @ 0x3C / 60)
+    - 3 lines of 9pt FreeMono font.
+    - Middle row (Row 1) serves as user's 'selection'.
+    - Top Level: Animals, Houses, Streets, Cars, Roofs, Back
+    - Cars Submenu: Buick, Oldsmobile, Ford, BMW, Elon, Back
+    - Navigation:
+        CW rotates downward, CCW rotates upward.
+        Top/bottom boundaries indicated by '---------'.
+        Clicking 'Back' on Top Level turns screen DARK.
+        Clicking button on dark screen wakes display to Top Level ('Animals' selected).
+        Clicking 'Cars' on Top Level enters Cars Submenu ('Buick' selected).
+        Clicking 'Back' on Cars Submenu returns to Top Level ('Cars' selected).
+    - Controls:
+        [ESC] Exit and return to menu
+        [I] Invert CW/CCW direction
+        [H] Toggle Half-Step mode
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST M] MULTI-LEVEL OLED MENU TEST ---")
+    print(f"Rotary Node: {rotary_target} (Pins: SW={sw_pin}, DT={dt_pin}, CLK={clk_pin})")
+    print(f"OLED Target: {oled_target} (SSD1306 @ 0x{oled_addr:02X})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    # Step 1: Configuring OLED display on Kitchen
+    print(f"\n[*] Step 1: Configuring OLED display on {oled_target}...")
+    setup_ssd1306_display(client, target=oled_target, addr=oled_addr, timeout=timeout)
+    time.sleep(0.1)
+
+    # Step 2: Configuring Keyes KY-040 Rotary Encoder on N2
+    print(f"[*] Step 2: Configuring Keyes KY-040 Rotary Encoder on {rotary_target}...")
+    setup_rotary_encoder(client, target=rotary_target, clk=clk_pin, dt=dt_pin, sw=sw_pin, timeout=timeout)
+    time.sleep(0.05)
+    client.send_line(f"{rotary_target} SetRotaryHalfStep 1")
+    time.sleep(0.05)
+
+    MENU_TOP = ["Animals", "Houses", "Streets", "Cars", "Roofs", "Back"]
+    MENU_CARS = ["Buick", "Oldsmobile", "Ford", "BMW", "Elon", "Back"]
+    BOUNDARY = "---------"
+
+    current_level = "TOP"  # "TOP", "CARS", "DARK"
+    sel_idx = 0
+    inverted = False
+    half_step = True
+
+    def get_lines(items, idx):
+        top_str = BOUNDARY if idx == 0 else items[idx - 1]
+        mid_str = items[idx]
+        bot_str = BOUNDARY if idx == len(items) - 1 else items[idx + 1]
+        return top_str, mid_str, bot_str
+
+    # Step 3: Setting initial OLED screen
+    l0, l1, l2 = get_lines(MENU_TOP, 0)
+    print(f"\n[*] Step 3: Setting initial OLED menu screen (Level: TOP, Selected: '{l1}')...")
+    print(f"  Line 1: {l0}")
+    print(f"  Line 2: {l1}  <-- SELECTION")
+    print(f"  Line 3: {l2}")
+    update_menu_oled_display(client, oled_target=oled_target, line0=l0, line1=l1, line2=l2, font_size=9)
+
+    print("\n" + "-" * 65)
+    print(f"[*] Multi-Level Menu active!")
+    print(f"    - Turn Knob CW:  Move selection down")
+    print(f"    - Turn Knob CCW: Move selection up")
+    print(f"    - Push Knob:     Select item / Wake dark screen")
+    print(f"    - Press [I]:     Invert CW/CCW rotation direction")
+    print(f"    - Press [H]:     Toggle half-step mode")
+    print(f"    - Press [ESC]:   Finish and return to menu.")
+    print("-" * 65 + "\n")
+
+    event_queue = queue.Queue()
+    last_event_type = None
+    last_event_time = 0.0
+
+    def on_rx(msg: str):
+        nonlocal last_event_type, last_event_time
+        if f"< {rotary_target}:" in msg or "Rotary" in msg:
+            evt = None
+            if "RotaryCW" in msg:
+                evt = "CW"
+            elif "RotaryCCW" in msg:
+                evt = "CCW"
+            elif "RotaryButtonDown" in msg:
+                evt = "BTN_DOWN"
+            elif "RotaryButtonUp" in msg:
+                evt = "BTN_UP"
+            elif "RotaryButtonPushed" in msg:
+                evt = "BTN_DOWN"
+
+            if evt is not None:
+                now = time.time()
+                if evt == last_event_type and (now - last_event_time) < 0.050:
+                    return
+                last_event_type = evt
+                last_event_time = now
+                event_queue.put(evt)
+
+    client.add_rx_callback(on_rx)
+    flush_console_keys()
+
+    cw_events = 0
+    ccw_events = 0
+    btn_events = 0
+
+    try:
+        while True:
+            # Check keyboard controls
+            if msvcrt is not None and msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch == b'\x1b':
+                    break
+                elif ch in (b'i', b'I'):
+                    inverted = not inverted
+                    client.send_line(f"{rotary_target} SetRotaryInvert {1 if inverted else 0}")
+                    print(f"[*] Rotary Direction Inverted: {'INVERTED' if inverted else 'NORMAL'}")
+                elif ch in (b'h', b'H'):
+                    half_step = not half_step
+                    client.send_line(f"{rotary_target} SetRotaryHalfStep {1 if half_step else 0}")
+                    print(f"[*] Rotary Half-Step Mode: {'ENABLED' if half_step else 'DISABLED'}")
+                elif ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
+                    msvcrt.getch()
+            elif check_esc_key():
+                break
+
+            try:
+                event = event_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+
+            dirty = False
+
+            if event == "CW":
+                cw_events += 1
+                if current_level != "DARK":
+                    items = MENU_TOP if current_level == "TOP" else MENU_CARS
+                    if sel_idx < len(items) - 1:
+                        sel_idx += 1
+                        dirty = True
+                        print(f"  [>] Rotary CW: Selection -> '{items[sel_idx]}' ({sel_idx + 1}/{len(items)})")
+                    else:
+                        print(f"  [>] Rotary CW: At bottom of list ('{items[sel_idx]}')")
+                else:
+                    print(f"  [>] Rotary CW: Screen is dark (press button to wake)")
+
+            elif event == "CCW":
+                ccw_events += 1
+                if current_level != "DARK":
+                    items = MENU_TOP if current_level == "TOP" else MENU_CARS
+                    if sel_idx > 0:
+                        sel_idx -= 1
+                        dirty = True
+                        print(f"  [<] Rotary CCW: Selection -> '{items[sel_idx]}' ({sel_idx + 1}/{len(items)})")
+                    else:
+                        print(f"  [<] Rotary CCW: At top of list ('{items[sel_idx]}')")
+                else:
+                    print(f"  [<] Rotary CCW: Screen is dark (press button to wake)")
+
+            elif event == "BTN_DOWN":
+                btn_events += 1
+                if current_level == "DARK":
+                    current_level = "TOP"
+                    sel_idx = 0
+                    dirty = True
+                    print(f"  [o] Rotary Button Clicked: Screen waking up -> Top Level ('Animals' selected)")
+                elif current_level == "TOP":
+                    selected = MENU_TOP[sel_idx]
+                    if selected == "Back":
+                        current_level = "DARK"
+                        clear_display(client, target=oled_target, timeout=0.8, verbose=False)
+                        print(f"  [o] Rotary Button Clicked on 'Back': Screen goes DARK (Click button to wake)")
+                    elif selected == "Cars":
+                        current_level = "CARS"
+                        sel_idx = 0
+                        dirty = True
+                        print(f"  [o] Rotary Button Clicked on 'Cars': Entering Cars Submenu -> 'Buick' selected")
+                    else:
+                        print(f"  [o] Rotary Button Clicked on: '{selected}' (Top Level)")
+                elif current_level == "CARS":
+                    selected = MENU_CARS[sel_idx]
+                    if selected == "Back":
+                        current_level = "TOP"
+                        sel_idx = MENU_TOP.index("Cars")
+                        dirty = True
+                        print(f"  [o] Rotary Button Clicked on 'Back': Returning to Top Level -> 'Cars' selected")
+                    else:
+                        print(f"  [o] Rotary Button Clicked on car: '{selected}'")
+
+            elif event == "BTN_UP":
+                pass
+
+            if dirty and current_level != "DARK":
+                items = MENU_TOP if current_level == "TOP" else MENU_CARS
+                l0, l1, l2 = get_lines(items, sel_idx)
+                print(f"[OLED MENU UPDATE] Level: {current_level} | Selected: [{l1}] ({sel_idx + 1}/{len(items)})")
+                print(f"  Line 1: {l0}")
+                print(f"  Line 2: {l1}  <-- SELECTION")
+                print(f"  Line 3: {l2}")
+                update_menu_oled_display(client, oled_target=oled_target, line0=l0, line1=l1, line2=l2, font_size=9)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        client.remove_rx_callback(on_rx)
+        flush_console_keys()
+
+    print("\n" + "-" * 65)
+    print(f"[*] Menu test ended.")
+    print(f"    Final Level:     {current_level}")
+    print(f"    Final Selection: {sel_idx}")
+    print(f"    Total Events:    CW={cw_events}, CCW={ccw_events}, Button={btn_events}")
+    print("-" * 65)
     return True
 
 
@@ -5113,6 +5382,7 @@ def main():
     parser.add_argument("--n2", type=str, default="N2", help="N2 node name in coordinator device table (default: N2)")
     parser.add_argument("--rotary", action="store_true", help="Run Keyes KY-040 Rotary Encoder test (N2 -> Kitchen OLED) and exit")
     parser.add_argument("--rotary-raw", "--rotary-z", "-z", action="store_true", help="Run [Z] Keyes KY-040 2-bit raw monitor test (Print-on-Change) and exit")
+    parser.add_argument("--menu", action="store_true", help="Run multi-level OLED menu test (N2 Rotary -> Kitchen OLED) and exit")
 
     args = parser.parse_args()
 
@@ -5127,6 +5397,10 @@ def main():
 
     try:
         # CLI direct test execution flags
+        if args.menu:
+            passed = run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+            sys.exit(0 if passed else 1)
+
         if args.rotary_raw:
             passed = run_rotary_raw_monitor_test(client, target=args.n2, clk_pin=18, dt_pin=20, sw_pin=19)
             sys.exit(0 if passed else 1)
@@ -5303,7 +5577,8 @@ def main():
             print("  # These hardware tests require user input:")
             print(f"  [3] Multi-Node LED & Serial Blink (All Endpoints + DotStar Auto-Bridge, count {args.count})")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
-            print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
+            print("  [M] Multi-Level OLED Menu Test  (N2 Rotary [19,20,18] -> 3-Line 9pt Menu on Kitchen OLED)")
+            print("  [I] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [19,20,18] -> OLED Kitchen Display)")
@@ -5330,7 +5605,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, I, D, R, G, B, E, O, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -5360,7 +5635,9 @@ def main():
                 run_adcpot_ramp_test(client, target=args.target)
             elif choice in ("S", "SERVO", "PWM"):
                 run_servo_pwm_test(client, target=args.target)
-            elif choice in ("M", "MOTOR", "CYTRON"):
+            elif choice in ("M", "MENU", "OLEDMENU"):
+                run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+            elif choice in ("I", "MOTOR", "CYTRON"):
                 run_cytron_motor_test(client, target=args.target)
             elif choice in ("D", "PROX", "PROXIMITY"):
                 run_proximity_test(client, target=args.target)

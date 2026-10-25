@@ -3530,6 +3530,133 @@ def run_rotary_encoder_test(
     return True
 
 
+def run_rotary_raw_monitor_test(
+    client: CoordinatorClient,
+    target: str = "N2",
+    sw_pin: int = 19,
+    dt_pin: int = 20,
+    clk_pin: int = 18,
+) -> bool:
+    """
+    [TEST Z] Rotary Encoder 2-Bit Raw Monitor (Print-on-Change):
+    - Node: N2 (SW=19, DT=20, CLK=18)
+    - Monitors real-time pin level changes (CLK, DT, SW) and prints each transition with timestamp.
+    - Demonstrates quadrature 2-bit Gray code sequence (11 -> 01 -> 00 -> 10 -> 11).
+    - Detects whether detents rest at 11 or 00, transition direction, contact bouncing, and step emissions.
+    - Press [ESC] to exit.
+    """
+    print("\n" + "=" * 75)
+    print("--- [TEST Z] ROTARY ENCODER 2-BIT RAW MONITOR (PRINT-ON-CHANGE) ---")
+    print(f"Target Node: {target} (Pins: SW={sw_pin}, DT={dt_pin}, CLK={clk_pin})")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 75)
+
+    # Step 1: Configure Rotary Encoder hardware
+    print(f"\n[*] Step 1: Initializing Keyes KY-040 hardware on {target}...")
+    setup_rotary_encoder(client, target=target, clk=clk_pin, dt=dt_pin, sw=sw_pin, timeout=3.0)
+    time.sleep(0.1)
+
+    # Step 2: Start raw bit streaming
+    print(f"[*] Step 2: Enabling live raw bit monitoring on {target} ({target} MonitorRotary 1)...")
+    client.send_line(f"{target} MonitorRotary 1")
+    time.sleep(0.1)
+
+    print("\n" + "-" * 75)
+    print("Live 2-bit monitoring active! Rotate knob CW / CCW or press the button.")
+    print("  [CLK]  = Phase A (Bit 1)")
+    print("  [DT]   = Phase B (Bit 0)")
+    print("  [BITS] = 2-bit Gray code value [CLK, DT]")
+    print("  [SW]   = Pushbutton state (HIGH = released, LOW = pressed)")
+    print("  Controls: [I] Invert CW/CCW | [H] Toggle Half-Step | [ESC] Exit")
+    print("-" * 75)
+    print(f"{'TIMESTAMP':<14} {'CLK':<5} {'DT':<5} {'BITS':<6} {'SW':<6} {'DELTA':<9} {'EVENT / ANALYSIS'}")
+    print("-" * 75)
+
+    flush_console_keys()
+    last_bits_val = None
+    inverted = False
+    half_step = False
+
+    def on_rx(msg: str):
+        nonlocal last_bits_val
+        now_str = datetime.now().strftime("%H:%M:%S.%f")[:12]
+
+        if "RotaryBits" in msg:
+            try:
+                parts = msg.split()
+                bits = "??"
+                clk = "?"
+                dt = "?"
+                sw = "?"
+                delta = "+0ms"
+
+                for p in parts:
+                    if p.startswith("clk="): clk = p.split("=")[1]
+                    elif p.startswith("dt="): dt = p.split("=")[1]
+                    elif p.startswith("sw="): sw = p.split("=")[1]
+                    elif p.startswith("+") and p.endswith("ms"): delta = p
+                    elif len(p) == 2 and p in ("00", "01", "10", "11"): bits = p
+
+                sw_label = "PUSH" if sw == "0" else "UP"
+
+                note = ""
+                if bits == "11":
+                    note = "<-- Detent resting state (both HIGH)"
+                elif bits == "00":
+                    note = "<-- Both LOW (midpoint / half-step)"
+                elif bits == "01":
+                    note = "CLK fell, DT high (CW start / CCW finish)"
+                elif bits == "10":
+                    note = "CLK high, DT fell (CCW start / CW finish)"
+
+                print(f"{now_str:<14} {clk:<5} {dt:<5} {bits:<6} {sw_label:<6} {delta:<9} {note}")
+                last_bits_val = bits
+            except Exception:
+                print(f"{now_str:<14} [RAW] {msg.strip()}")
+
+        elif "RotaryCW" in msg:
+            print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [>>] FSM EMITTED: RotaryCW (Clockwise Detent Step)")
+        elif "RotaryCCW" in msg:
+            print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [<<] FSM EMITTED: RotaryCCW (Counter-Clockwise Detent Step)")
+        elif "RotaryButtonPushed" in msg:
+            print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [OO] FSM EMITTED: RotaryButtonPushed (Debounced Button Press)")
+
+    client.add_rx_callback(on_rx)
+
+    try:
+        while True:
+            if msvcrt is not None and msvcrt.kbhit():
+                ch = msvcrt.getch()
+                if ch == b'\x1b':
+                    break
+                elif ch in (b'i', b'I'):
+                    inverted = not inverted
+                    client.send_line(f"{target} SetRotaryInvert {1 if inverted else 0}")
+                    print(f"[*] Direction Invert: {'INVERTED' if inverted else 'NORMAL'}")
+                elif ch in (b'h', b'H'):
+                    half_step = not half_step
+                    client.send_line(f"{target} SetRotaryHalfStep {1 if half_step else 0}")
+                    print(f"[*] Half-Step Mode: {'ENABLED' if half_step else 'DISABLED'}")
+                elif ch in (b'\x00', b'\xe0') and msvcrt.kbhit():
+                    msvcrt.getch()
+            elif check_esc_key():
+                break
+
+            time.sleep(0.02)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        client.remove_rx_callback(on_rx)
+        client.send_line(f"{target} MonitorRotary 0")
+        flush_console_keys()
+
+    print("\n" + "-" * 75)
+    print(f"[*] Test [Z] completed. Raw monitor stopped on {target}.")
+    print("-" * 75)
+    return True
+
+
 def setup_compass(client: CoordinatorClient, target: str = "Kitchen", addr: int = 13, timeout: float = 3.0) -> bool:
     """Initializes QMC5883L 3-axis digital compass on target node (default: 13 / 0x0D)."""
     got_ack = threading.Event()
@@ -4907,6 +5034,7 @@ def main():
     parser.add_argument("--garage-port", type=str, default=None, help="Optional serial port for Garage node hardware reset (e.g. COM8)")
     parser.add_argument("--n2", type=str, default="N2", help="N2 node name in coordinator device table (default: N2)")
     parser.add_argument("--rotary", action="store_true", help="Run Keyes KY-040 Rotary Encoder test (N2 -> Kitchen OLED) and exit")
+    parser.add_argument("--rotary-raw", "--rotary-z", "-z", action="store_true", help="Run [Z] Keyes KY-040 2-bit raw monitor test (Print-on-Change) and exit")
 
     args = parser.parse_args()
 
@@ -4921,6 +5049,10 @@ def main():
 
     try:
         # CLI direct test execution flags
+        if args.rotary_raw:
+            passed = run_rotary_raw_monitor_test(client, target=args.n2, clk_pin=18, dt_pin=20, sw_pin=19)
+            sys.exit(0 if passed else 1)
+
         if args.rotary:
             passed = run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
             sys.exit(0 if passed else 1)
@@ -5097,6 +5229,7 @@ def main():
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
             print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [19,20,18] -> OLED Kitchen Display)")
+            print("  [Z] Rotary 2-Bit Raw Monitor    (N2 Pins [19,20,18]: Live Print-on-Change CLK/DT/SW + Timestamps)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Red ON->OFF -> Green ON->ZERO -> Blue ON->OFF)")
@@ -5119,7 +5252,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, D, R, G, B, E, O, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -5165,6 +5298,8 @@ def main():
                 run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             elif choice in ("K", "ROTARY", "ENCODER", "KY040"):
                 run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
+            elif choice in ("Z", "RAWROTARY", "MONITORROTARY", "ROTORAY", "ROTARYRAW"):
+                run_rotary_raw_monitor_test(client, target=args.n2, clk_pin=18, dt_pin=20, sw_pin=19)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
                 clear_display(client, target=args.target)
             elif choice in ("F", "MAG", "COMPASSMAG", "COMPASSHYST"):

@@ -3321,7 +3321,7 @@ def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     return all_passed
 
 
-def setup_rotary_encoder(client: CoordinatorClient, target: str = "N2", clk: int = 19, dt: int = 20, sw: int = 18, timeout: float = 3.0) -> bool:
+def setup_rotary_encoder(client: CoordinatorClient, target: str = "N2", clk: int = 18, dt: int = 20, sw: int = 19, timeout: float = 3.0) -> bool:
     """Initializes Keyes KY-040 Rotary Encoder on target node."""
     got_ack = threading.Event()
     status_ok = False
@@ -3373,15 +3373,15 @@ def run_rotary_encoder_test(
     rotary_target: str = "N2",
     oled_target: str = "Kitchen",
     oled_addr: int = 60,
-    sw_pin: int = 18,
+    sw_pin: int = 19,
     dt_pin: int = 20,
-    clk_pin: int = 19,
+    clk_pin: int = 18,
     initial_count: int = 0,
 ) -> bool:
     """
     Interactive Keyes KY-040 Rotary Encoder Test:
     - Node: N2
-    - Pins: SW=Pin 18, DT=Pin 20, CLK=Pin 19
+    - Pins: SW=Pin 19, DT=Pin 20, CLK=Pin 18
     - Kitchen OLED: Displays Count on Line 1 (0 to 8 range) and SW state (ON/OFF) on Line 2
     - Tracks total count: CW increases count (ceiling 8), CCW decreases count (floor 0)
     - Pushbutton SW toggles ON/OFF state
@@ -5067,7 +5067,7 @@ def main():
             print("  [M] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
             print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
-            print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [18,20,19] -> OLED Kitchen Display)")
+            print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [19,20,18] -> OLED Kitchen Display)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Red ON->OFF -> Green ON->ZERO -> Blue ON->OFF)")

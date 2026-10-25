@@ -3589,22 +3589,20 @@ def run_rotary_raw_monitor_test(
     print("-" * 75)
 
     flush_console_keys()
-    last_bits_val = None
-    last_raw_msg = ""
-    last_raw_time = 0.0
+    last_state = None
+    last_transition_time = None
+    last_cw_time = 0.0
+    last_ccw_time = 0.0
+    last_btn_time = 0.0
     inverted = False
     half_step = False
 
     def on_rx(msg: str):
-        nonlocal last_bits_val, last_raw_msg, last_raw_time
+        nonlocal last_state, last_transition_time, last_cw_time, last_ccw_time, last_btn_time
         now_str = datetime.now().strftime("%H:%M:%S.%f")[:12]
         now = time.time()
 
         if "RotaryBits" in msg:
-            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
-                return
-            last_raw_msg = msg
-            last_raw_time = now
             try:
                 parts = msg.split()
                 bits = "??"
@@ -3621,6 +3619,21 @@ def run_rotary_raw_monitor_test(
                     elif len(p) == 2 and p in ("00", "01", "10", "11"): bits = p
 
                 sw_label = "PUSH" if sw == "0" else "UP"
+                curr_state = (bits, sw_label)
+
+                # True Print-On-Change: ignore duplicate state packets
+                if curr_state == last_state:
+                    return
+
+                # Calculate accurate wall-clock elapsed time between actual state changes
+                if last_transition_time is not None:
+                    calc_delta_ms = int((now - last_transition_time) * 1000)
+                    delta = f"+{calc_delta_ms}ms"
+                else:
+                    delta = "+0ms"
+
+                last_state = curr_state
+                last_transition_time = now
 
                 note = ""
                 if bits == "11":
@@ -3633,27 +3646,23 @@ def run_rotary_raw_monitor_test(
                     note = "CLK high, DT fell (CCW start / CW finish)"
 
                 print(f"{now_str:<14} {clk:<5} {dt:<5} {bits:<6} {sw_label:<6} {delta:<9} {note}")
-                last_bits_val = bits
             except Exception:
                 print(f"{now_str:<14} [RAW] {msg.strip()}")
 
         elif "RotaryCW" in msg:
-            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+            if (now - last_cw_time) < 0.050:
                 return
-            last_raw_msg = msg
-            last_raw_time = now
+            last_cw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [>>] FSM EMITTED: RotaryCW (Clockwise Detent Step)")
         elif "RotaryCCW" in msg:
-            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+            if (now - last_ccw_time) < 0.050:
                 return
-            last_raw_msg = msg
-            last_raw_time = now
+            last_ccw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [<<] FSM EMITTED: RotaryCCW (Counter-Clockwise Detent Step)")
         elif "RotaryButtonPushed" in msg:
-            if msg == last_raw_msg and (now - last_raw_time) < 0.050:
+            if (now - last_btn_time) < 0.050:
                 return
-            last_raw_msg = msg
-            last_raw_time = now
+            last_btn_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [OO] FSM EMITTED: RotaryButtonPushed (Debounced Button Press)")
 
     client.add_rx_callback(on_rx)

@@ -123,11 +123,12 @@ class CoordinatorClient:
 
     def add_rx_callback(self, cb):
         with self._lock:
-            self.rx_callbacks.append(cb)
+            if cb not in self.rx_callbacks:
+                self.rx_callbacks.append(cb)
 
     def remove_rx_callback(self, cb):
         with self._lock:
-            if cb in self.rx_callbacks:
+            while cb in self.rx_callbacks:
                 self.rx_callbacks.remove(cb)
 
     def _read_loop(self):

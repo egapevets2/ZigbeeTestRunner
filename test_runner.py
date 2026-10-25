@@ -3439,7 +3439,7 @@ def run_rotary_encoder_test(
     print(f"[*] Rotary Encoder live monitoring active!")
     print(f"    - Turn Knob CW:  Count increases (Ceiling = 8)")
     print(f"    - Turn Knob CCW: Count decreases (Floor = 0)")
-    print(f"    - Push Knob:     SW toggles between ON and OFF")
+    print(f"    - Push & Hold:   SW displays ON while held, OFF when released")
     print(f"    - Press [I]:     Invert CW/CCW rotation direction")
     print(f"    - Press [H]:     Toggle half-step mode")
     print(f"    - Press [ESC]:   Finish and return to menu.")
@@ -3457,8 +3457,12 @@ def run_rotary_encoder_test(
                 evt = "CW"
             elif "RotaryCCW" in msg:
                 evt = "CCW"
+            elif "RotaryButtonDown" in msg:
+                evt = "BTN_DOWN"
+            elif "RotaryButtonUp" in msg:
+                evt = "BTN_UP"
             elif "RotaryButtonPushed" in msg:
-                evt = "BUTTON"
+                evt = "BTN_DOWN"
 
             if evt is not None:
                 now = time.time()
@@ -3520,9 +3524,17 @@ def run_rotary_encoder_test(
                     print(f"  [<] Rotary CCW: Count -> {count} (floor 0)")
                 else:
                     print(f"  [<] Rotary CCW: Count already at floor (0)")
-            elif event == "BUTTON":
+            elif event == "BTN_DOWN":
                 btn_events += 1
-                sw_state = not sw_state
+                if not sw_state:
+                    sw_state = True
+                    dirty = True
+                    print(f"  [o] Rotary Button PRESSED: SW state -> ON")
+            elif event == "BTN_UP":
+                if sw_state:
+                    sw_state = False
+                    dirty = True
+                    print(f"  [o] Rotary Button RELEASED: SW state -> OFF")
                 dirty = True
                 print(f"  [o] Rotary Button Pushed: SW state -> {'ON' if sw_state else 'OFF'}")
 
@@ -3661,6 +3673,16 @@ def run_rotary_raw_monitor_test(
                 return
             last_ccw_time = now
             print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [<<] FSM EMITTED: RotaryCCW (Counter-Clockwise Detent Step)")
+        elif "RotaryButtonDown" in msg:
+            if (now - last_btn_time) < 0.050:
+                return
+            last_btn_time = now
+            print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [OO] FSM EMITTED: RotaryButtonDown (Button Pressed / Held)")
+        elif "RotaryButtonUp" in msg:
+            if (now - last_btn_time) < 0.050:
+                return
+            last_btn_time = now
+            print(f"{now_str:<14} {' ':5} {' ':5} {' ':6} {' ':6} {' ':9} *** [..] FSM EMITTED: RotaryButtonUp (Button Released)")
         elif "RotaryButtonPushed" in msg:
             if (now - last_btn_time) < 0.050:
                 return

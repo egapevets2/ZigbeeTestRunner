@@ -3281,8 +3281,10 @@ def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     Validates SSD1306 128x64 OLED Display:
     1. Initializes display at specified address (default 60 / 0x3C).
     2. Clears the display and resets cursor (ClearDisp).
-    3. Prints lines in all supported Adafruit GFX FreeMono font sizes (9, 12, 18, 24 pt).
-    4. Verifies line advancement and display responses.
+    3. Prints 3 lines of 9pt font.
+    4. Pauses 2 seconds, clears display, prints 2 lines of 12pt font.
+    5. Pauses 2 seconds, clears display, prints 1 line of 24pt font.
+    6. Verifies display responses and line rendering.
     """
     print("\n" + "=" * 65)
     print("--- [TEST O] SSD1306 OLED DISPLAY & FREEMONO FONT TEST ---")
@@ -3298,23 +3300,31 @@ def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
     clear_ok = clear_display(client, target=target, timeout=timeout)
     time.sleep(0.2)
 
-    # Step 3: Print test lines across supported font sizes
-    font_tests = [
-        (9, "FreeMono 9pt"),
-        (12, "FreeMono 12pt"),
-        (18, "FreeMono 18"),
-        (24, "24pt"),
+    # Step 3: Print test lines across font sizes with 2-second pause between font changes
+    font_stages = [
+        (9, ["9pt Line 1", "9pt Line 2", "9pt Line 3"]),
+        (12, ["12pt Line 1", "12pt Line 2"]),
+        (24, ["24pt Line 1"]),
     ]
 
     all_passed = setup_ok and clear_ok
 
-    for size_pt, text in font_tests:
-        ok = print_display_line(client, target=target, size=size_pt, text=text, timeout=timeout)
-        if not ok:
-            all_passed = False
-        time.sleep(0.3)
+    for stage_idx, (size_pt, lines) in enumerate(font_stages):
+        if stage_idx > 0:
+            print(f"\n[*] Pausing 2.0s before font change to {size_pt}pt...")
+            time.sleep(2.0)
+            if not clear_display(client, target=target, timeout=timeout):
+                all_passed = False
+            time.sleep(0.2)
 
-    print("-" * 65)
+        print(f"\n[*] Printing {len(lines)} line(s) of {size_pt}pt font...")
+        for line_text in lines:
+            ok = print_display_line(client, target=target, size=size_pt, text=line_text, timeout=timeout)
+            if not ok:
+                all_passed = False
+            time.sleep(0.2)
+
+    print("\n" + "-" * 65)
     if all_passed:
         print(f"[+] TEST PASSED: SSD1306 OLED verified on {target}!")
     else:

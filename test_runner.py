@@ -3365,6 +3365,128 @@ def setup_rotary_encoder(client: CoordinatorClient, target: str = "N2", clk: int
     return status_ok
 
 
+def run_i2c_latched_bus_test(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    timeout: float = 6.0
+) -> bool:
+    """
+    [TEST 4] I2C Latched-Bus Fault Injection & Upstream Detection Test:
+      1. Verifies baseline I2C health on target:
+         - Initializes serial bridge / disp setup to confirm I2C is functional.
+      2. Prompts the operator to short the I2C SDA lead (GPIO 22) to GND:
+         - Simulates a hung/latched slave or bus short.
+      3. Triggers an I2C transaction while SDA is shorted:
+         - Observes that the end point's latched-bus detector detects SDA=0.
+         - Confirms that the end point transmits upstream alert to Coordinator:
+           'I2C BUS LATCHED: <DEVICE> (SDA=0 SCL=...)'
+      4. Prompts the operator to remove the short from SDA.
+      5. Verifies bus recovery on the target:
+         - Confirms that I2C communication recovers successfully.
+    """
+    print("\n" + "=" * 65)
+    print("--- [TEST 4] I2C LATCHED-BUS FAULT & DETECTION TEST ---")
+    print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
+    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 65)
+
+    print("\n[!] TEST OBJECTIVE:")
+    print("    This test verifies that if the I2C bus latches (SDA held LOW),")
+    print(f"    node '{target}' detects the latched bus and immediately sends an")
+    print("    upstream alert message to the Coordinator.")
+    print("=" * 65)
+
+    # Step 1: Baseline health check
+    print(f"\n[*] Step 1: Checking baseline I2C bus health on {target}...")
+    setup_ssd1306_display(client, target=target, addr=60, timeout=2.0)
+    time.sleep(0.1)
+
+    baseline_ok = clear_display(client, target=target, timeout=2.0, verbose=False)
+    if baseline_ok:
+        print(f"  [+] Baseline check PASSED: I2C bus on {target} is operating normally.")
+    else:
+        print(f"  [!] Note: Initial clear display did not confirm, proceeding with test anyway.")
+
+    # Step 2: Prompt user to short SDA to GND
+    print("\n" + "-" * 65)
+    print("[!] ACTION REQUIRED (FAULT INJECTION):")
+    print(f"    Please temporarily connect a jumper wire from I2C SDA (GPIO 22)")
+    print(f"    to GND on node '{target}'.")
+    print("    (This safely pulls the open-drain SDA line LOW to simulate a latched bus)")
+    print("-" * 65)
+    try:
+        input("\n>>> Press ENTER once SDA (GPIO 22) is shorted to GND... ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n[-] Test cancelled by user.")
+        return False
+
+    # Step 3: Trigger I2C transaction and listen for upstream alert
+    print(f"\n[*] Step 3: Triggering I2C operation on {target} while SDA is shorted...")
+    print(f"    Listening for upstream 'I2C BUS LATCHED' alert (timeout: {timeout:.1f}s)...")
+
+    got_alert = threading.Event()
+    received_alert_msg = None
+
+    def on_rx(msg: str):
+        nonlocal received_alert_msg
+        clean = msg.strip()
+        if "I2C BUS LATCHED" in clean or "I2C BUS FAIL" in clean:
+            received_alert_msg = clean
+            got_alert.set()
+
+    client.add_rx_callback(on_rx)
+    try:
+        # Send an I2C command to trigger the bus transaction
+        client.send_line(f"{target} ClearDisp")
+        time.sleep(0.3)
+        client.send_line(f"{target} rawI2Crd 0")
+
+        # Wait for the latched bus notification from the endpoint
+        if got_alert.wait(timeout=timeout):
+            print(f"\n  [+] ALERT RECEIVED FROM {target}!")
+            print(f"      Coordinator Rx: \"{received_alert_msg}\"")
+            detection_passed = True
+        else:
+            print(f"\n  [-] ERROR: Timed out after {timeout:.1f}s waiting for 'I2C BUS LATCHED' message.")
+            detection_passed = False
+    finally:
+        client.remove_rx_callback(on_rx)
+
+    # Step 4: Prompt user to remove the short
+    print("\n" + "-" * 65)
+    print("[!] ACTION REQUIRED (BUS RECOVERY):")
+    print(f"    Please REMOVE the jumper wire from I2C SDA / GND on node '{target}'.")
+    print("-" * 65)
+    try:
+        input("\n>>> Press ENTER once the short is removed... ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n[-] Test cancelled by user.")
+        return False
+
+    # Step 5: Verify recovery
+    print(f"\n[*] Step 5: Verifying I2C bus recovery on {target}...")
+    time.sleep(0.2)
+    recovery_ok = clear_display(client, target=target, timeout=2.5, verbose=False)
+    if not recovery_ok:
+        # Retry once more in case automatic 9-clock recovery took an extra cycle
+        time.sleep(0.3)
+        recovery_ok = clear_display(client, target=target, timeout=2.5, verbose=False)
+
+    if recovery_ok:
+        print(f"  [+] Recovery check PASSED: I2C bus on {target} has recovered and is functional.")
+    else:
+        print(f"  [!] Warning: Post-recovery I2C command did not acknowledge immediately.")
+
+    print("\n" + "=" * 65)
+    if detection_passed:
+        print(f"[+] TEST [4] PASSED: Latched-bus fault detected and reported by {target} successfully!")
+    else:
+        print(f"[-] TEST [4] FAILED: Latched-bus alert was not received from {target}.")
+    print("=" * 65)
+
+    return detection_passed
+
+
 def update_rotary_oled_display(client: CoordinatorClient, oled_target: str = "Kitchen", count: int = 0, sw_state: bool = False, font_size: int = 12) -> None:
     """
     Updates the Kitchen OLED display:
@@ -5522,6 +5644,7 @@ def main():
     parser.add_argument("--rotary", action="store_true", help="Run Keyes KY-040 Rotary Encoder test (N2 -> Kitchen OLED) and exit")
     parser.add_argument("--rotary-raw", "--rotary-z", "-z", action="store_true", help="Run [Z] Keyes KY-040 2-bit raw monitor test (Print-on-Change) and exit")
     parser.add_argument("--menu", action="store_true", help="Run multi-level OLED menu test (N2 Rotary -> Kitchen OLED) and exit")
+    parser.add_argument("--i2c-latch", "--latch", action="store_true", help="Run [4] I2C Latched-Bus Fault Test and exit")
     parser.add_argument("--expected", nargs="+", default=DEFAULT_EXPECTED_ENDPOINTS, help="Expected endpoints for RF stats (default: Kitchen Garage N2 N1)")
 
     args = parser.parse_args()
@@ -5537,6 +5660,10 @@ def main():
 
     try:
         # CLI direct test execution flags
+        if args.i2c_latch:
+            passed = run_i2c_latched_bus_test(client, target=args.target)
+            sys.exit(0 if passed else 1)
+
         if args.menu:
             passed = run_oled_menu_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr, expected_endpoints=args.expected)
             sys.exit(0 if passed else 1)
@@ -5732,6 +5859,7 @@ def main():
             print("  [7] Read ADC Channel            (ReadADCA0 / ReadADCA1 / ReadADCA2)")
             print("  [R] Read Proximity Values       (ReadProximity - Continuous, ESC to stop)")
             print("  [6] Arduino Hardware DAC Test   (setDAC X)            [Auto-Bridge]")
+            print("  [4] I2C Latched-Bus Fault Test  (Prompt Short SDA -> Observe Alert -> Verify Recovery)")
             print("  [C] Clear OLED Display          (ClearDisp)")
             print("  [Q] Read Compass Values         (GetCompass)")
             print("  [Z] Rotary 2-Bit Raw Monitor    (N2 Pins [19,20,18]: Live Print-on-Change CLK/DT/SW + Timestamps)")
@@ -5751,8 +5879,10 @@ def main():
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
             elif choice == "2":
                 run_setup_bridge_test(client, target=args.target)
-            elif choice in ("3", "4", "BLINK", "BLINKX"):
+            elif choice in ("3", "BLINK", "BLINKX"):
                 run_multi_node_blink_test(client, count=args.count, target=args.target, garage_target=args.garage, n2_target=args.n2)
+            elif choice in ("4", "LATCH", "I2CLATCH", "I2CBUS", "BUSLATCH", "LB"):
+                run_i2c_latched_bus_test(client, target=args.target)
             elif choice == "5":
                 run_setup_bridge_test(client, target=args.target)
                 time.sleep(0.3)

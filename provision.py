@@ -89,6 +89,11 @@ class Provisioner:
         print("===================================\n")
 
     def set_role(self, role: str, name: str = None):
+        if (role == "EndDevice" or role == "node") and not name:
+            print("[-] Error: Node name is required when provisioning as EndDevice.")
+            print("    Usage: python provision.py -p <PORT> --role EndDevice --name <NodeName>")
+            print("    Example: python provision.py -p COM5 --role EndDevice --name Kitchen")
+            return
         cmd = f"SetRole {role}"
         if name:
             cmd += f" {name}"
@@ -165,6 +170,10 @@ def main():
             client.set_name(args.name)
 
         if args.role is not None:
+            if (args.role == "EndDevice" or args.role == "node") and not args.name:
+                print("[-] Error: --name <NodeName> is required when provisioning as EndDevice!")
+                print("    Example: python provision.py -p COM5 --role EndDevice --name Kitchen")
+                sys.exit(1)
             client.set_role(args.role, args.name)
 
     except KeyboardInterrupt:

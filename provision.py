@@ -117,6 +117,9 @@ class Provisioner:
             print(f"  {line}")
 
     def set_tx_power(self, power: int):
+        if power < 8 or power > 84:
+            print(f"[-] Error: TX power {power} out of range (8 to 84 quarter-dBm, +2.0 to +21.0 dBm)")
+            return
         cmd = f"SetTxPower {power}"
         print(f"[*] Sending: '{cmd}'")
         lines = self.send_command(cmd, wait_sec=0.8)
@@ -164,6 +167,9 @@ def main():
             client.set_channel(args.channel)
 
         if args.power is not None:
+            if args.power < 8 or args.power > 84:
+                print(f"[-] Error: --power {args.power} out of range (8 to 84 quarter-dBm, +2.0 to +21.0 dBm)")
+                sys.exit(1)
             client.set_tx_power(args.power)
 
         if args.name is not None and args.role is None:

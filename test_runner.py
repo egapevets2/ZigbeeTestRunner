@@ -2436,8 +2436,26 @@ def run_cytron_rfloss_test(
     return passed
 
 
-def setup_proximity(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> bool:
-    """Initializes the APDS9930 proximity sensor on the target node (`<target> SetupProximity`)."""
+def setup_proximity(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    mux_port: int | None = 0,
+    mux_addr: int = 112,
+    init_mux: bool = True,
+    timeout: float = 3.0,
+) -> bool:
+    """
+    Initializes the APDS9930 proximity sensor on the target node.
+    If `mux_port` is specified (default: 0), optionally initializes TCA9548A I2Cmux (`init_mux=True`)
+    and selects `mux_port` first.
+    """
+    if mux_port is not None and mux_port >= 0:
+        if init_mux:
+            setup_i2cmux(client, target=target, addr=mux_addr, timeout=timeout)
+            time.sleep(0.08)
+        set_i2cmux_channel(client, target=target, channel=mux_port, timeout=timeout)
+        time.sleep(0.08)
+
     setup_event = threading.Event()
     status_ok = False
 
@@ -2452,7 +2470,8 @@ def setup_proximity(client: CoordinatorClient, target: str = "Kitchen", timeout:
 
     client.add_rx_callback(on_rx)
     cmd = f"{target} SetupProximity"
-    print(f"\n[>] Initializing APDS9930 Proximity on {target}: \"{cmd}\"")
+    mux_desc = f" (I2Cmux Port {mux_port})" if (mux_port is not None and mux_port >= 0) else ""
+    print(f"\n[>] Initializing APDS9930 Proximity on {target}{mux_desc}: \"{cmd}\"")
     start_time = time.time()
     client.send_line(cmd)
     setup_event.wait(timeout=timeout)
@@ -2460,22 +2479,32 @@ def setup_proximity(client: CoordinatorClient, target: str = "Kitchen", timeout:
     client.remove_rx_callback(on_rx)
 
     if status_ok:
-        print(f"[+] APDS9930 Proximity initialized successfully on {target} ({elapsed:.1f}ms).")
+        print(f"[+] APDS9930 Proximity initialized successfully on {target}{mux_desc} ({elapsed:.1f}ms).")
     else:
-        print(f"[!] Warning: SetupProximity did not receive OK confirmation from {target}.")
+        print(f"[!] Warning: SetupProximity did not receive OK confirmation from {target}{mux_desc}.")
     return status_ok
 
 
-def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeout: float = 3.0) -> int | None:
-    """Sends `<target> ReadProximity` and returns the proximity count (or None on failure)."""
+def read_proximity_val(
+    client: CoordinatorClient,
+    target: str = "Kitchen",
+    mux_port: int | None = None,
+    timeout: float = 3.0,
+) -> int | None:
+    """Sends `<target> ReadProximity` (optionally selecting `mux_port` first) and returns the proximity count."""
+    if mux_port is not None and mux_port >= 0:
+        set_i2cmux_channel(client, target=target, channel=mux_port, timeout=timeout)
+        time.sleep(0.04)
+
     val_event = threading.Event()
     prox_reading = [None]
+    expected_token = f"PROXval_mx{mux_port}" if (mux_port is not None and mux_port >= 0) else "PROXval"
 
     def on_rx(msg: str):
         if "PROXval" in msg:
             parts = msg.strip().split()
             for i, p in enumerate(parts):
-                if p == "PROXval" and i + 1 < len(parts):
+                if (p == expected_token or p.startswith("PROXval")) and i + 1 < len(parts):
                     try:
                         prox_reading[0] = int(parts[i + 1])
                         val_event.set()
@@ -2492,19 +2521,22 @@ def read_proximity_val(client: CoordinatorClient, target: str = "Kitchen", timeo
     return prox_reading[0]
 
 
-def run_proximity_stream(client: CoordinatorClient, target: str = "Kitchen", interval: float = 0.3) -> None:
+def run_proximity_stream(client: CoordinatorClient, target: str = "Kitchen", mux_port: int = 0, interval: float = 0.3) -> None:
     """
-    Streams APDS9930 proximity readings continuously once every 300ms
+    Streams APDS9930 proximity readings continuously once every 300ms on I2Cmux `mux_port` (default: 0)
     until the user presses the ESC key (operates identically to 'Q' compass streaming).
     """
-    # Check if proximity sensor is ready; if uninitialized, configure it once
+    set_i2cmux_channel(client, target=target, channel=mux_port, timeout=1.5)
+    time.sleep(0.05)
+
+    # Check if proximity sensor is ready; if uninitialized, configure it once on mux_port
     test_reading = read_proximity_val(client, target=target, timeout=0.3)
     if test_reading is None:
-        print(f"[*] Initializing APDS9930 Proximity sensor on {target}...")
-        setup_proximity(client, target=target, timeout=2.0)
+        print(f"[*] Initializing APDS9930 Proximity sensor on {target} (I2Cmux Port {mux_port})...")
+        setup_proximity(client, target=target, mux_port=mux_port, timeout=2.0)
         time.sleep(0.1)
 
-    print(f"\n[+] Streaming {target} APDS9930 Proximity readings every {int(interval * 1000)}ms.")
+    print(f"\n[+] Streaming {target} APDS9930 Proximity (I2Cmux Port {mux_port}) readings every {int(interval * 1000)}ms.")
     print("    Format: proximity (Press [ESC] to stop)\n")
 
     flush_console_keys()
@@ -2565,56 +2597,64 @@ def _run_proximity_cycle(
     phase_label: str,
     low_thrsh: int,
     high_thrsh: int,
+    mux_port: int | None = 0,
     timeout: float = 20.0,
 ) -> bool:
-    """Runs a single obstacle approach ('Car Detected') and withdrawal ('Car removed') verification cycle."""
+    """Runs a single obstacle approach ('Car Detected_mx0') and withdrawal ('Car removed_mx0') verification cycle."""
     detected_event = threading.Event()
     detected_val = [None]
     removed_event = threading.Event()
     removed_val = [None]
 
+    suffix = f"_mx{mux_port}" if (mux_port is not None and mux_port >= 0) else ""
+    det_token = f"Detected{suffix}"
+    rem_token = f"removed{suffix}"
+    det_label = f"Car {det_token}"
+    rem_label = f"Car {rem_token}"
+    port_desc = f" on I2Cmux Port {mux_port}" if (mux_port is not None and mux_port >= 0) else ""
+
     def on_prox_event(msg: str):
-        if "Car Detected" in msg:
+        if det_label in msg:
             parts = msg.strip().split()
             for i, p in enumerate(parts):
-                if p == "Detected" and i + 1 < len(parts):
+                if p == det_token and i + 1 < len(parts):
                     detected_val[0] = parts[i + 1]
             detected_event.set()
-        elif "Car removed" in msg:
+        elif rem_label in msg:
             parts = msg.strip().split()
             for i, p in enumerate(parts):
-                if p == "removed" and i + 1 < len(parts):
+                if p == rem_token and i + 1 < len(parts):
                     removed_val[0] = parts[i + 1]
             removed_event.set()
 
     client.add_rx_callback(on_prox_event)
 
     print("\n" + "-" * 65)
-    print(f">>> [{phase_label}] Thresholds: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}] <<<")
-    print(f">>> ACTION REQUIRED: Bring your hand or an obstacle near the APDS9930 sensor (proximity > {high_thrsh}). <<<")
-    print(f"Waiting up to {int(timeout)} seconds for 'Car Detected' event...")
+    print(f">>> [{phase_label}] Thresholds: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}]{port_desc} <<<")
+    print(f">>> ACTION REQUIRED: Bring your hand or an obstacle near the APDS9930 sensor{port_desc} (proximity > {high_thrsh}). <<<")
+    print(f"Waiting up to {int(timeout)} seconds for '{det_label}' event...")
     got_detected = detected_event.wait(timeout=timeout)
 
     if not got_detected:
-        print(f"\n[-] {phase_label} FAILED: Timed out waiting for 'Car Detected' event.")
+        print(f"\n[-] {phase_label} FAILED: Timed out waiting for '{det_label}' event.")
         client.remove_rx_callback(on_prox_event)
         return False
 
     val_str = f" (reading: {detected_val[0]})" if detected_val[0] else ""
-    print(f"\n[+] [{phase_label}] OBSTACLE DETECTED{val_str} verified over Zigbee!")
+    print(f"\n[+] [{phase_label}] OBSTACLE DETECTED ('{det_label}'){val_str} verified over Zigbee!")
 
-    print(f"\n>>> ACTION REQUIRED: Move your hand away from the sensor (proximity < {low_thrsh}). <<<")
-    print(f"Waiting up to {int(timeout)} seconds for 'Car removed' event...")
+    print(f"\n>>> ACTION REQUIRED: Move your hand away from the sensor{port_desc} (proximity < {low_thrsh}). <<<")
+    print(f"Waiting up to {int(timeout)} seconds for '{rem_label}' event...")
     got_removed = removed_event.wait(timeout=timeout)
 
     client.remove_rx_callback(on_prox_event)
 
     if not got_removed:
-        print(f"\n[-] {phase_label} FAILED: Timed out waiting for 'Car removed' event.")
+        print(f"\n[-] {phase_label} FAILED: Timed out waiting for '{rem_label}' event.")
         return False
 
     val_rem_str = f" (reading: {removed_val[0]})" if removed_val[0] else ""
-    print(f"\n[+] [{phase_label}] OBSTACLE REMOVAL{val_rem_str} verified over Zigbee!")
+    print(f"\n[+] [{phase_label}] OBSTACLE REMOVAL ('{rem_label}'){val_rem_str} verified over Zigbee!")
     return True
 
 
@@ -2625,22 +2665,30 @@ def run_proximity_test(
     high_thrsh: int = 500,
     low_thrsh2: int = 400,
     high_thrsh2: int = 800,
+    mux_port: int = 0,
+    mux_port2: int = 1,
+    mux_addr: int = 112,
+    timeout: float = 20.0,
 ) -> bool:
     """
-    Executes the 2-Phase APDS9930 Proximity Sensor Hysteresis Test:
-    1. Initializes APDS9930 sensor (<target> SetupProximity).
+    Executes the APDS9930 Proximity Sensor Test across I2Cmux Port 0 and Port 1:
+    1. Initializes TCA9548A I2Cmux (`SetupI2Cmux 112`), selects `SetI2Cmux 0`, and initializes APDS9930 (`SetupProximity`).
     2. Configures Phase 1 hysteresis thresholds [ProxLowThrsh=200, ProxHighThrsh=500].
-    3. Queries baseline ambient proximity value (<target> ReadProximity).
-    4. Runs Phase 1 detection & removal cycle at [200, 500].
-    5. If Phase 1 passes, updates [ProxLowThrsh, ProxHighThrsh] to [400, 800] and runs Phase 2 detection & removal cycle.
+    3. Queries baseline ambient proximity value on I2Cmux Port 0 (`ReadProximity` -> `PROXval_mx0 <val>`).
+    4. Runs Phase 1 detection & removal cycle at [200, 500] (`Car Detected_mx0` / `Car removed_mx0`).
+    5. Updates [ProxLowThrsh, ProxHighThrsh] to [400, 800] and runs Phase 2 detection & removal cycle on Port 0.
+    6. Selects `SetI2Cmux 1`, initializes the second APDS9930 on I2Cmux Port 1 (`SetupProximity`), prompts the user
+       to cover the Port 1 sensor, and passes when the Coordinator receives `'Car Detected_mx1 <val>'`.
     """
-    print("\n" + "=" * 65)
-    print("--- [TEST D] APDS9930 PROXIMITY SENSOR HYSTERESIS TEST ---")
-    print(f"Target Node: {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
-    print(f"Phase 1 Hysteresis: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}]")
-    print(f"Phase 2 Hysteresis: [ProxLowThrsh={low_thrsh2}, ProxHighThrsh={high_thrsh2}]")
+    print("\n" + "=" * 68)
+    print(f"--- [TEST D] APDS9930 PROXIMITY SENSOR TEST (I2CMUX PORTS {mux_port} & {mux_port2}) ---")
+    print(f"Target Node:        {target} (ESP32-C6 I2C SDA=GPIO22, SCL=GPIO23)")
+    print(f"I2C Multiplexer:    TCA9548A @ 0x{mux_addr:02X} ({mux_addr}) -> Port {mux_port} (_mx{mux_port}) & Port {mux_port2} (_mx{mux_port2})")
+    print(f"Phase 1 Hysteresis: [ProxLowThrsh={low_thrsh}, ProxHighThrsh={high_thrsh}] (Port {mux_port})")
+    print(f"Phase 2 Hysteresis: [ProxLowThrsh={low_thrsh2}, ProxHighThrsh={high_thrsh2}] (Port {mux_port})")
+    print(f"Phase 3 Port {mux_port2} Test: Setup Port {mux_port2} sensor & verify 'Car Detected_mx{mux_port2}' on cover")
     print(f"Timestamp:          {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
+    print("=" * 68)
 
     def on_rx(msg: str):
         print(f"  <-- [RX] {msg}")
@@ -2648,55 +2696,85 @@ def run_proximity_test(
     client.add_rx_callback(on_rx)
 
     try:
-        # Step 1: Setup Proximity
-        setup_event = threading.Event()
-        def on_setup(msg: str):
-            if "SETUP PROX OK" in msg:
-                setup_event.set()
-
-        client.add_rx_callback(on_setup)
-        cmd = f"{target} SetupProximity"
-        print(f"\n[>] Initializing APDS9930 sensor: \"{cmd}\"")
-        client.send_line(cmd)
-        got_setup = setup_event.wait(timeout=3.0)
-        client.remove_rx_callback(on_setup)
-
-        if not got_setup:
-            print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' from {target}.")
+        # Step 1: Setup I2Cmux, select Port 0, and initialize APDS9930 Proximity on Port 0
+        if not setup_proximity(client, target=target, mux_port=mux_port, mux_addr=mux_addr, init_mux=True, timeout=3.0):
+            print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' on {target} (I2Cmux Port {mux_port}).")
             return False
-        print(f"[+] APDS9930 sensor initialized successfully.")
         time.sleep(0.2)
 
         # Step 2: Configure Phase 1 hysteresis thresholds [200, 500]
         set_proximity_thresholds(client, target=target, low_thrsh=low_thrsh, high_thrsh=high_thrsh)
 
-        # Step 3: Read baseline proximity reading
-        print(f"\n[>] Reading baseline proximity...")
-        baseline = read_proximity_val(client, target=target, timeout=3.0)
+        # Step 3: Read baseline proximity reading on I2Cmux Port 0
+        print(f"\n[>] Reading baseline proximity on I2Cmux Port {mux_port}...")
+        baseline = read_proximity_val(client, target=target, mux_port=mux_port, timeout=3.0)
         if baseline is not None:
-            print(f"[+] Baseline proximity reading: {baseline}")
+            print(f"[+] Baseline proximity reading (PROXval_mx{mux_port}): {baseline}")
         else:
             print(f"[!] Warning: Could not read instantaneous baseline proximity reading, continuing.")
 
-        # Step 4: Phase 1 Detection & Removal Cycle at [200, 500]
-        if not _run_proximity_cycle(client, phase_label="PHASE 1/2", low_thrsh=low_thrsh, high_thrsh=high_thrsh):
+        # Step 4: Phase 1 Detection & Removal Cycle at [200, 500] on Port 0
+        if not _run_proximity_cycle(client, phase_label="PHASE 1/3 (PORT 0)", low_thrsh=low_thrsh, high_thrsh=high_thrsh, mux_port=mux_port, timeout=timeout):
             return False
 
         print(f"\n[+] Phase 1 ([{low_thrsh}, {high_thrsh}]) PASSED! Updating [ProxLowThrsh, ProxHighThrsh] to [{low_thrsh2}, {high_thrsh2}]...")
         time.sleep(0.3)
 
-        # Step 5: Update hysteresis thresholds to [400, 800] and run Phase 2
+        # Step 5: Update hysteresis thresholds to [400, 800] and run Phase 2 on Port 0
         set_proximity_thresholds(client, target=target, low_thrsh=low_thrsh2, high_thrsh=high_thrsh2)
         time.sleep(0.2)
 
-        if not _run_proximity_cycle(client, phase_label="PHASE 2/2", low_thrsh=low_thrsh2, high_thrsh=high_thrsh2):
+        if not _run_proximity_cycle(client, phase_label="PHASE 2/3 (PORT 0)", low_thrsh=low_thrsh2, high_thrsh=high_thrsh2, mux_port=mux_port, timeout=timeout):
             return False
+
+        print(f"\n[+] Port {mux_port} tests PASSED! Now initializing second APDS9930 on I2Cmux Port {mux_port2}...")
+        time.sleep(0.3)
+
+        # Step 6: Setup APDS9930 Proximity on I2Cmux Port 1 (without resetting the mux)
+        if not setup_proximity(client, target=target, mux_port=mux_port2, mux_addr=mux_addr, init_mux=False, timeout=3.0):
+            print(f"[-] TEST FAILED: Timed out waiting for 'SETUP PROX OK' on {target} (I2Cmux Port {mux_port2}).")
+            return False
+        time.sleep(0.2)
+
+        # Prompt user to cover Port 1 sensor and wait for 'Car Detected_mx1'
+        det_token2 = f"Detected_mx{mux_port2}"
+        det_label2 = f"Car {det_token2}"
+        port1_detected = threading.Event()
+        port1_val = [None]
+
+        def on_port1_prox(msg: str):
+            if det_label2 in msg:
+                parts = msg.strip().split()
+                for i, p in enumerate(parts):
+                    if p == det_token2 and i + 1 < len(parts):
+                        port1_val[0] = parts[i + 1]
+                port1_detected.set()
+
+        client.add_rx_callback(on_port1_prox)
+        try:
+            print("\n" + "-" * 65)
+            print(f">>> [PHASE 3/3 (PORT {mux_port2})] Second Proximity Sensor on I2Cmux Port {mux_port2} (_mx{mux_port2}) <<<")
+            print(f">>> ACTION REQUIRED: Cover the I2Cmux Port {mux_port2} APDS9930 sensor (proximity > {high_thrsh2}). <<<")
+            print(f"Waiting up to {int(timeout)} seconds for '{det_label2}' event from {target}...")
+            got_port1 = port1_detected.wait(timeout=timeout)
+        finally:
+            client.remove_rx_callback(on_port1_prox)
+
+        if not got_port1:
+            print(f"\n[-] PHASE 3/3 FAILED: Timed out waiting for '{det_label2}' event from Port {mux_port2} sensor.")
+            return False
+
+        val2_str = f" (reading: {port1_val[0]})" if port1_val[0] else ""
+        print(f"\n[+] [PHASE 3/3 (PORT {mux_port2})] CLOSE PROXIMITY ('{det_label2}'){val2_str} verified over Zigbee!")
 
     finally:
         client.remove_rx_callback(on_rx)
 
-    print("-" * 65)
-    print(f"[+] TEST PASSED: APDS9930 Proximity sensor verified at both [{low_thrsh}, {high_thrsh}] and [{low_thrsh2}, {high_thrsh2}]!")
+    print("-" * 68)
+    print(
+        f"[+] TEST PASSED: APDS9930 Proximity sensors verified on both I2Cmux Port {mux_port} (_mx{mux_port}) "
+        f"and I2Cmux Port {mux_port2} (_mx{mux_port2})!"
+    )
     return True
 
 
@@ -3088,6 +3166,85 @@ def read_expand8_bit(client: CoordinatorClient, target: str = "Kitchen", bit: in
     return read_val
 
 
+def setup_i2cmux(client: CoordinatorClient, target: str = "Kitchen", addr: int = 112, timeout: float = 3.0) -> bool:
+    """Initializes TCA9548A I2C multiplexer on target node (default address: 112 / 0x70)."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SETUP I2CMUX OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "SETUP I2CMUX FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    cmd = f"{target} SetupI2Cmux {addr}"
+    print(f"\n[>] Initializing TCA9548A I2Cmux on {target} at I2C address {addr} (0x{addr:02X}): \"{cmd}\"")
+    start_time = time.time()
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    elapsed = (time.time() - start_time) * 1000.0
+    client.remove_rx_callback(on_rx)
+
+    if status_ok:
+        print(f"[+] TCA9548A I2Cmux initialized successfully on {target} at address {addr} (0x{addr:02X}) ({elapsed:.1f}ms).")
+    else:
+        print(f"[!] Warning: SetupI2Cmux did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def set_i2cmux_channel(client: CoordinatorClient, target: str = "Kitchen", channel: int = 0, addr: int | None = None, timeout: float = 3.0) -> bool:
+    """Selects downstream channel (0..7, or -1 to disable all channels) on TCA9548A I2Cmux."""
+    got_ack = threading.Event()
+    status_ok = False
+
+    def on_rx(msg: str):
+        nonlocal status_ok
+        if "SET I2CMUX OK" in msg:
+            status_ok = True
+            got_ack.set()
+        elif "SET I2CMUX FAIL" in msg:
+            status_ok = False
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    if addr is not None:
+        cmd = f"{target} SetI2Cmux {channel} {addr}"
+    else:
+        cmd = f"{target} SetI2Cmux {channel}"
+    ch_desc = f"channel {channel}" if channel >= 0 else "ALL DISABLED (-1)"
+    print(f"  [>] Selecting I2Cmux {ch_desc} on {target}: \"{cmd}\"")
+    client.send_line(cmd)
+    got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+
+    if not status_ok:
+        print(f"  [!] Warning: SetI2Cmux {channel} did not receive OK confirmation from {target}.")
+    return status_ok
+
+
+def write_expand8_byte(client: CoordinatorClient, target: str, byte_val: int, addr: int | None = None, timeout: float = 3.0) -> bool:
+    """Writes a full 8-bit byte (0x00..0xFF) to PCF8574 Expand8 on target node."""
+    got_ack = threading.Event()
+
+    def on_rx(msg: str):
+        if f"< {target}:" in msg and ("[ACK]" in msg or "EXPAND8 WR OK" in msg):
+            got_ack.set()
+
+    client.add_rx_callback(on_rx)
+    if addr is not None:
+        cmd = f"{target} wrExpand8byte {byte_val} {addr}"
+    else:
+        cmd = f"{target} wrExpand8byte {byte_val}"
+    client.send_line(cmd)
+    success = got_ack.wait(timeout=timeout)
+    client.remove_rx_callback(on_rx)
+    return success
+
+
 def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 32, addr2: int | None = None, timeout: float = 3.0) -> bool:
     """
     Validates BOTH instances of PCF8574 8-bit I/O Expander on `target`:
@@ -3177,9 +3334,93 @@ def run_expand8_test(client: CoordinatorClient, target: str = "Kitchen", addr: i
 
         time.sleep(0.2)
 
+    # Pass 3: Cross-Chip Pin Change Upstream Notification Test (0x20 P1 -> 0x21 P2 -> NewByte_33 <X>)
+    print(
+        f"\n[>] === Pass 3: Cross-Expander Pin-Change Notification Test "
+        f"(0x{addr1:02X} P1 -> 0x{addr2:02X} P2 -> 'NewByte_{addr2} <X>') ==="
+    )
+    print(f"  [*] Preparing baseline: setting 0x{addr2:02X} ({addr2}) to 0xFF (all inputs) and 0x{addr1:02X} ({addr1}) P1 = 0...")
+    write_expand8_byte(client, target=target, byte_val=0xFF, addr=addr2, timeout=timeout)
+    time.sleep(0.05)
+    write_expand8_byte(client, target=target, byte_val=0xFF, addr=addr1, timeout=timeout)
+    time.sleep(0.05)
+    write_expand8_bit(client, target=target, bit=1, val=0, addr=addr1, timeout=timeout)
+    # Wait > 250ms sample period + UpstreamQ throttle for baseline (P1=0 -> P2=0) to settle
+    time.sleep(0.6)
+
+    newbyte_evt = threading.Event()
+    rx_newbyte_val: list[int | None] = [None]
+    rx_newbyte_raw: list[str] = [""]
+    newbyte_pattern = re.compile(rf"\bNewByte_{addr2}\s+(\d+)\b", re.IGNORECASE)
+
+    def on_newbyte_rx(msg: str):
+        clean = msg.strip()
+        if f"NewByte_{addr2}" in clean or f"NewByte_{addr1}" in clean:
+            print(f"      <-- [RX] {clean}")
+        m = newbyte_pattern.search(clean)
+        if m:
+            rx_newbyte_val[0] = int(m.group(1))
+            rx_newbyte_raw[0] = clean
+            newbyte_evt.set()
+
+    client.add_rx_callback(on_newbyte_rx)
+    try:
+        # Step 3a: Toggle 0x20 P1 from 0 -> 1 and verify 0x21 sends NewByte_33 message
+        newbyte_evt.clear()
+        rx_newbyte_val[0] = None
+        print(f"\n  [>] Step 3a: Toggling 0x{addr1:02X} ({addr1}) P1 from 0 -> 1 (\"{target} wrExpand8 1 1 {addr1}\")...")
+        write_expand8_bit(client, target=target, bit=1, val=1, addr=addr1, timeout=timeout)
+
+        got_high_msg = newbyte_evt.wait(timeout=3.0)
+        if got_high_msg and rx_newbyte_val[0] is not None and ((rx_newbyte_val[0] >> 2) & 1) == 1:
+            print(
+                f"  [+] PASS (0 -> 1): Coordinator received 'NewByte_{addr2} {rx_newbyte_val[0]}' "
+                f"(0x{rx_newbyte_val[0]:02X}, P2=1) from 0x{addr2:02X}!"
+            )
+        elif got_high_msg and rx_newbyte_val[0] is not None:
+            print(
+                f"  [-] FAIL (0 -> 1): Received 'NewByte_{addr2} {rx_newbyte_val[0]}' "
+                f"(0x{rx_newbyte_val[0]:02X}), but P2 (bit 2) was 0 (expected 1)."
+            )
+            all_passed = False
+        else:
+            print(f"  [-] FAIL (0 -> 1): Timed out waiting for 'NewByte_{addr2} <X>' message from {target}.")
+            all_passed = False
+
+        time.sleep(0.3)
+
+        # Step 3b: Toggle 0x20 P1 from 1 -> 0 and verify 0x21 sends NewByte_33 message
+        newbyte_evt.clear()
+        rx_newbyte_val[0] = None
+        print(f"\n  [>] Step 3b: Toggling 0x{addr1:02X} ({addr1}) P1 from 1 -> 0 (\"{target} wrExpand8 1 0 {addr1}\")...")
+        write_expand8_bit(client, target=target, bit=1, val=0, addr=addr1, timeout=timeout)
+
+        got_low_msg = newbyte_evt.wait(timeout=3.0)
+        if got_low_msg and rx_newbyte_val[0] is not None and ((rx_newbyte_val[0] >> 2) & 1) == 0:
+            print(
+                f"  [+] PASS (1 -> 0): Coordinator received 'NewByte_{addr2} {rx_newbyte_val[0]}' "
+                f"(0x{rx_newbyte_val[0]:02X}, P2=0) from 0x{addr2:02X}!"
+            )
+        elif got_low_msg and rx_newbyte_val[0] is not None:
+            print(
+                f"  [-] FAIL (1 -> 0): Received 'NewByte_{addr2} {rx_newbyte_val[0]}' "
+                f"(0x{rx_newbyte_val[0]:02X}), but P2 (bit 2) was 1 (expected 0)."
+            )
+            all_passed = False
+        else:
+            print(f"  [-] FAIL (1 -> 0): Timed out waiting for 'NewByte_{addr2} <X>' message from {target}.")
+            all_passed = False
+    finally:
+        client.remove_rx_callback(on_newbyte_rx)
+        # Restore 0x20 P1 back to 1 (idle pull-up)
+        write_expand8_bit(client, target=target, bit=1, val=1, addr=addr1, timeout=timeout)
+
     print("-" * 65)
     if all_passed:
-        print(f"[+] TEST PASSED: Both PCF8574 instances (0x{addr1:02X} & 0x{addr2:02X}) verified on {target}!")
+        print(
+            f"[+] TEST PASSED: Both PCF8574 instances (0x{addr1:02X} & 0x{addr2:02X}) and "
+            f"P1->P2 'NewByte_{addr2}' upstream notifications verified on {target}!"
+        )
     else:
         print(f"[-] TEST FAILED: Dual PCF8574 Expand8 verification failed on {target}.")
     return all_passed
@@ -3277,62 +3518,6 @@ def print_display_line(client: CoordinatorClient, target: str = "Kitchen", size:
         else:
             print(f"[!] Print line did not receive OK confirmation from {target}.")
     return status_ok
-
-
-def run_ssd1306_test(client: CoordinatorClient, target: str = "Kitchen", addr: int = 60, timeout: float = 3.0) -> bool:
-    """
-    Validates SSD1306 128x64 OLED Display:
-    1. Initializes display at specified address (default 60 / 0x3C).
-    2. Clears the display and resets cursor (ClearDisp).
-    3. Prints 3 lines of 9pt font.
-    4. Pauses 2 seconds, clears display, prints 2 lines of 12pt font.
-    5. Pauses 2 seconds, clears display, prints 1 line of 24pt font.
-    6. Verifies display responses and line rendering.
-    """
-    print("\n" + "=" * 65)
-    print("--- [TEST O] SSD1306 OLED DISPLAY & FREEMONO FONT TEST ---")
-    print(f"Target Node: {target} (ESP32-C6 / SSD1306 @ 0x{addr:02X})")
-    print(f"Timestamp:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 65)
-
-    # Step 1: Initialize Display
-    setup_ok = setup_ssd1306_display(client, target=target, addr=addr, timeout=timeout)
-    time.sleep(0.2)
-
-    # Step 2: Clear Display
-    clear_ok = clear_display(client, target=target, timeout=timeout)
-    time.sleep(0.2)
-
-    # Step 3: Print test lines across font sizes with 2-second pause between font changes
-    font_stages = [
-        (9, ["9pt Line 1", "9pt Line 2", "9pt Line 3"]),
-        (12, ["12pt Line 1", "12pt Line 2"]),
-        (24, ["24pt Line 1"]),
-    ]
-
-    all_passed = setup_ok and clear_ok
-
-    for stage_idx, (size_pt, lines) in enumerate(font_stages):
-        if stage_idx > 0:
-            print(f"\n[*] Pausing 2.0s before font change to {size_pt}pt...")
-            time.sleep(2.0)
-            if not clear_display(client, target=target, timeout=timeout):
-                all_passed = False
-            time.sleep(0.2)
-
-        print(f"\n[*] Printing {len(lines)} line(s) of {size_pt}pt font...")
-        for line_text in lines:
-            ok = print_display_line(client, target=target, size=size_pt, text=line_text, timeout=timeout)
-            if not ok:
-                all_passed = False
-            time.sleep(0.2)
-
-    print("\n" + "-" * 65)
-    if all_passed:
-        print(f"[+] TEST PASSED: SSD1306 OLED verified on {target}!")
-    else:
-        print(f"[-] TEST FAILED: SSD1306 OLED verification failed on {target}.")
-    return all_passed
 
 
 def setup_rotary_encoder(client: CoordinatorClient, target: str = "N2", clk: int = 18, dt: int = 20, sw: int = 19, timeout: float = 3.0) -> bool:
@@ -4316,7 +4501,7 @@ def get_compass_reading(client: CoordinatorClient, target: str = "Kitchen", time
     """
     got_event = threading.Event()
     reading = None
-    pattern = re.compile(r"COMPASS\s+([-\d]+)\s+([-\d]+)\s+([-\d]+)", re.IGNORECASE)
+    pattern = re.compile(r"COMPASS(?:_mx\d+)?\s+([-\d]+)\s+([-\d]+)\s+([-\d]+)", re.IGNORECASE)
 
     def on_rx(msg: str):
         nonlocal reading
@@ -4556,7 +4741,7 @@ def run_compass_hysteresis_test(
     t_start = time.time()
 
     pattern = re.compile(
-        r"\bMag([XYZ])\s+(-?[01])\s+(-?\d+)(?:\s+(-?\d+)\s+(-?\d+))?\b",
+        r"\bMag([XYZ])(?:_mx\d+)?\s+(-?[01])\s+(-?\d+)(?:\s+(-?\d+)\s+(-?\d+))?\b",
         re.IGNORECASE
     )
 
@@ -5492,7 +5677,7 @@ def run_full_regression_suite(client: CoordinatorClient, target: str = "Kitchen"
         "ADCpot_Ramp":       "[A] ADCpot Detent Ramp        (20 Detents, 0 -> 1023 -> 0)",
         "Garage_GPIO":       "[G] Garage Pin 16 GPIO Input  (Arduino PIN_D0 -> Garage Pin 16)",
         "Bidi_GPIO":         "[B] Bidirectional GPIO Wire   (Kitchen Pin 21 <-> Garage Pin 17)",
-        "Expand8":           "[E] Dual PCF8574 Expand8 Test (Both Chip Instances: Alternating 0/1 & 1/0)"
+        "Expand8":           "[E] Dual PCF8574 Expand8 Test (0x20 & 0x21 + P1->P2 NewByte_33 Link)"
     }
 
     all_passed = True
@@ -5596,19 +5781,19 @@ def main():
     parser.add_argument("--rfloss", "--cytron-rfloss", "--motor-rfloss", action="store_true", help="Run Cytron motor RF-loss gentle stop fail-safe test (100%% power -> pull coord power -> 0 -> reconnect -> 100%%) and exit")
     parser.add_argument("--schmitt", "--ramp", action="store_true", help="Run Schmitt trigger hysteresis ramp test (2s up + 2s down) and exit")
     parser.add_argument("--adcpot", "--pot", action="store_true", help="Run Closed-Loop DAC -> ADCpot 20-detent ramp test (0 -> 1023 -> 0) and exit")
-    parser.add_argument("--prox", "--proximity", action="store_true", help="Run APDS9930 Proximity Sensor test and exit")
-    parser.add_argument("--read-prox", action="store_true", help="Read APDS9930 instantaneous proximity value and exit")
+    parser.add_argument("--prox", "--proximity", action="store_true", help="Run APDS9930 Proximity Sensor test on I2Cmux Port 0 and exit")
+    parser.add_argument("--prox-mux-port", type=int, default=0, help="I2Cmux port for APDS9930 Proximity Sensor test (default: 0)")
+    parser.add_argument("--read-prox", action="store_true", help="Read APDS9930 instantaneous proximity value on I2Cmux Port 0 and exit")
     parser.add_argument("--garage", type=str, default="Garage", help="Garage node name in coordinator device table (default: Garage)")
     parser.add_argument("--gpio", "--garage-gpio", action="store_true", help="Run Garage Pin 16 GPIO input test (clrx/setx via Kitchen) and exit")
     parser.add_argument("--bidi-gpio", "--cross-gpio", action="store_true", help="Run bidirectional GPIO wire test (Kitchen Pin 21 <-> Garage Pin 17) and exit")
     parser.add_argument("--rfdrop", action="store_true", help="Run RFdropBlink Link-Loss test on target node (default: Garage, Pin 18) and exit")
     parser.add_argument("--rfdrop-pin", type=int, default=18, help="GPIO pin for RFdropBlink test (default: 18)")
-    parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run Dual PCF8574 Expand8 alternating bit test on both chip instances and exit")
-    parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for PCF8574 Expand8 Instance #1 (default: 32 / 0x20)")
-    parser.add_argument("--expand8-addr2", type=int, default=None, help="I2C address for PCF8574 Expand8 Instance #2 (default: auto-detect via scanI2C or 33 / 0x21)")
+    parser.add_argument("--expand8", "--pcf8574", action="store_true", help="Run Dual PCF8574 Expand8 test (0x20 & 0x21 + P1->P2 NewByte_33 link) and exit")
+    parser.add_argument("--expand8-addr", type=int, default=32, help="I2C address for first PCF8574 Expand8 (default: 32 / 0x20)")
+    parser.add_argument("--expand8-addr2", type=int, default=None, help="I2C address for second PCF8574 Expand8 (default: 33 / 0x21)")
     parser.add_argument("--cleardisp", action="store_true", help="Clear SSD1306 OLED display on target node and exit")
     parser.add_argument("--print-disp", nargs="+", help="Print text on SSD1306 OLED display ([size] text...) and exit")
-    parser.add_argument("--oled", "--ssd1306", "--disp", action="store_true", help="Run SSD1306 OLED multi-size FreeMono font test and exit")
     parser.add_argument("--oled-addr", type=int, default=60, help="I2C address for SSD1306 OLED (default: 60 / 0x3C)")
     parser.add_argument("--compass", "--qmc5883l", action="store_true", help="Run QMC5883L 3-axis compass rotation test and exit")
     parser.add_argument("--compass-hyst", "--mag", action="store_true", help="Run QMC5883L 12-threshold signed hysteresis test (X,Y,Z +/- [LowMag, HighMag]) and exit")
@@ -5723,10 +5908,6 @@ def main():
             passed = print_display_line(client, target=args.target, size=size, text=text)
             sys.exit(0 if passed else 1)
 
-        if args.oled:
-            passed = run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
-            sys.exit(0 if passed else 1)
-
         if args.compass:
             passed = run_compass_test(client, target=args.target, addr=args.compass_addr)
             sys.exit(0 if passed else 1)
@@ -5810,11 +5991,11 @@ def main():
             sys.exit(0 if passed else 1)
 
         if args.prox:
-            passed = run_proximity_test(client, target=args.target)
+            passed = run_proximity_test(client, target=args.target, mux_port=args.prox_mux_port)
             sys.exit(0 if passed else 1)
 
         if args.read_prox:
-            run_proximity_stream(client, target=args.target)
+            run_proximity_stream(client, target=args.target, mux_port=args.prox_mux_port)
             sys.exit(0)
 
         if args.rfdrop:
@@ -5839,15 +6020,14 @@ def main():
             print("  [A] ADCpot Detent Ramp Test     (20 Detents, 0 -> 1023 -> 0)  [Auto-Bridge]")
             print("  [G] Garage Pin 16 GPIO Test     (clrx/setx via Kitchen) [Auto-Bridge]")
             print("  [B] Bidirectional GPIO Wire     (Kitchen Pin 21 <-> Garage Pin 17)")
-            print("  [E] Dual PCF8574 Expand8 Test   (Both Instances: Alternating 0/1 & 1/0 Patterns)")
+            print("  [E] Dual PCF8574 Expand8 Test   (2 Instances: 0x20 & 0x21 Alternating Bit Verification)")
             print()
             print("  # These hardware tests require user input:")
             print(f"  [3] Multi-Node LED & Serial Blink (All Endpoints + DotStar Auto-Bridge, count {args.count})")
             print("  [S] Servo / PWM Test            (Pin 2: Snap vs Slew 30)")
             print("  [M] Multi-Level OLED Menu Test  (N2 Rotary [19,20,18] -> 3-Line 9pt Menu on Kitchen OLED)")
             print("  [I] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
-            print("  [D] APDS9930 Proximity Test     (Setup, Baseline & Detection Cycle)")
-            print("  [O] SSD1306 OLED Display Test   (ClearDisp + Multi-Size FreeMono Prints)")
+            print("  [D] APDS9930 Proximity Test     (I2Cmux Port 0 2-Phase Cycle + Port 1 Cover Detection)")
             print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [19,20,18] -> OLED Kitchen Display)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
@@ -5873,7 +6053,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, I, D, R, G, B, E, O, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, I, D, R, G, B, E, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -5910,17 +6090,15 @@ def main():
             elif choice in ("I", "MOTOR", "CYTRON"):
                 run_cytron_motor_test(client, target=args.target)
             elif choice in ("D", "PROX", "PROXIMITY"):
-                run_proximity_test(client, target=args.target)
+                run_proximity_test(client, target=args.target, mux_port=args.prox_mux_port)
             elif choice in ("R", "READPROX"):
-                run_proximity_stream(client, target=args.target)
+                run_proximity_stream(client, target=args.target, mux_port=args.prox_mux_port)
             elif choice in ("G", "GPIO"):
                 run_garage_gpio_test(client, garage_target=args.garage, kitchen_target=args.target, pin=16)
             elif choice in ("B", "BIDI"):
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             elif choice in ("E", "EXPAND8", "PCF8574"):
                 run_expand8_test(client, target=args.target, addr=args.expand8_addr, addr2=args.expand8_addr2)
-            elif choice in ("O", "OLED", "SSD1306", "DISP"):
-                run_ssd1306_test(client, target=args.target, addr=args.oled_addr)
             elif choice in ("K", "ROTARY", "ENCODER", "KY040"):
                 run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
             elif choice in ("Z", "RAWROTARY", "MONITORROTARY", "ROTORAY", "ROTARYRAW"):

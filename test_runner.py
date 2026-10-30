@@ -6028,7 +6028,6 @@ def main():
             print("  [M] Multi-Level OLED Menu Test  (N2 Rotary [19,20,18] -> 3-Line 9pt Menu on Kitchen OLED)")
             print("  [I] Cytron 10C Motor Test       (PWM=Pin 18, DIR=Pin 20: 2s FWD, 4s REV, 1s Pause, 2s Return-0)")
             print("  [D] APDS9930 Proximity Test     (I2Cmux Port 0 2-Phase Cycle + Port 1 Cover Detection)")
-            print("  [K] Keyes KY-040 Rotary Test    (N2 Pins [19,20,18] -> OLED Kitchen Display)")
             print("  [F] QMC5883L 12-Threshold Test  (X,Y,Z +/- [LowMag=1000, HighMag=2000])")
             print("  [L] Garage RGB LED Fade Cycle   (Pins 18, 20, 19 PWM Fade 0-100%)")
             print("  [V] NeoPixel Strand Test        (Kitchen: Red ON->OFF -> Green ON->ZERO -> Blue ON->OFF)")
@@ -6053,7 +6052,7 @@ def main():
             print("  [X] Exit")
             print("=======================================================")
 
-            choice = input("Enter selection [0-9, A, S, M, I, D, R, G, B, E, C, K, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
+            choice = input("Enter selection [0-9, A, S, M, I, D, R, G, B, E, C, Z, F, Q, L, V, U, H, W, J, Y, N, P, T, X]: ").strip().upper()
 
             if choice == "1":
                 run_full_regression_suite(client, target=args.target, garage_target=args.garage, blink_count=args.count, blinkx_count=args.count)
@@ -6099,8 +6098,6 @@ def main():
                 run_bidirectional_gpio_test(client, kitchen_target=args.target, garage_target=args.garage, kitchen_pin=21, garage_pin=17)
             elif choice in ("E", "EXPAND8", "PCF8574"):
                 run_expand8_test(client, target=args.target, addr=args.expand8_addr, addr2=args.expand8_addr2)
-            elif choice in ("K", "ROTARY", "ENCODER", "KY040"):
-                run_rotary_encoder_test(client, rotary_target=args.n2, oled_target=args.target, oled_addr=args.oled_addr)
             elif choice in ("Z", "RAWROTARY", "MONITORROTARY", "ROTORAY", "ROTARYRAW"):
                 run_rotary_raw_monitor_test(client, target=args.n2, clk_pin=18, dt_pin=20, sw_pin=19)
             elif choice in ("C", "CLEARDISP", "CLEAR"):
